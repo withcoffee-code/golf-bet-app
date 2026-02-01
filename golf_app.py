@@ -1,6 +1,7 @@
 import streamlit as st
 from itertools import combinations
 from collections import Counter
+import pandas as pd
 
 # ----------------------
 # 페이지 설정
@@ -9,7 +10,7 @@ st.set_page_config(page_title="Kevin 룰 계산기", layout="centered")
 st.title("⛳ Kevin 룰 계산기")
 
 # ----------------------
-# 상태 저장
+# 상태 초기화
 # ----------------------
 if "players" not in st.session_state:
     st.session_state.players = ["A","B","C","D"]
@@ -134,7 +135,7 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
 # ----------------------
-# 이번 홀 계산
+# 이번 홀 계산 (그리드)
 # ----------------------
 if st.button("이번 홀 계산"):
     totals, matrix, all_tie, reasons, batch_reason_str = calculate_hole(
@@ -155,16 +156,19 @@ if st.button("이번 홀 계산"):
     })
 
     st.session_state.prev_all_tie = all_tie
-    st.session_state.hole += 1
 
-    st.subheader(f"홀 {st.session_state.hole-1} 결과")
-    st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
+    # 이번 홀 결과 그리드
+    hole_data = []
     for i,p in enumerate(players):
-        st.write(f"{p}: 스코어={score_labels[i]}, {reasons[i]}")
-        if totals[i] < 0:
-            st.write(f"→ {abs(totals[i]):,}원 받음")
-        else:
-            st.write(f"→ {totals[i]:,}원 냄")
+        status = "받음" if totals[i] < 0 else "냄" if totals[i] > 0 else "0원"
+        amt = abs(totals[i])
+        hole_data.append([p, score_labels[i], status, f"{amt:,}원"])
+    df_hole = pd.DataFrame(hole_data, columns=["플레이어","스코어","상태","이번 홀 금액"])
+    st.subheader(f"🏌️ 홀 {st.session_state.hole} 결과")
+    st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
+    st.dataframe(df_hole)
+
+    st.session_state.hole += 1
 
 # ----------------------
 # 이전 홀 되돌리기
@@ -177,17 +181,17 @@ if st.button("⬅ 이전 홀 되돌리기"):
         st.session_state.hole -= 1
 
 # ----------------------
-# 전체 리셋 버튼
+# 전체 리셋
 # ----------------------
 if st.button("🔄 전체 리셋"):
     st.session_state.total = [0,0,0,0]
     st.session_state.hole = 1
     st.session_state.history = []
     st.session_state.prev_all_tie = False
-    st.success("전체 상태가 초기화되었습니다!")
+    st.success("전체 상태와 현재 홀이 초기화되었습니다!")
 
 # ----------------------
-# 현재 누적 총액 표시 (벌었음/냄)
+# 현재 누적 총액 표시
 # ----------------------
 st.divider()
 st.subheader("📊 현재 누적 총액")
@@ -201,15 +205,36 @@ for i, p in enumerate(players):
         st.write(f"{p}: 0원 (벌거나 냄 없음)")
 
 # ----------------------
-# 최종 정산
+# 최종 정산 + 다음 라운드 핸디 계산
 # ----------------------
 if st.session_state.hole > 18:
     st.subheader("🎉 라운드 종료! 최종 정산")
+    # 누적 총액
     for i,p in enumerate(players):
-        if st.session_state.total[i] < 0:
-            st.write(f"{p}: {abs(st.session_state.total[i]):,}원 받음")
+        amt = st.session_state.total[i]
+        if amt < 0:
+            st.write(f"{p}: {abs(amt):,}원 받음")
+        elif amt > 0:
+            st.write(f"{p}: {amt:,}원 냄")
         else:
-            st.write(f"{p}: {st.session_state.total[i]:,}원 냄")
+            st.write(f"{p}: 0원 (벌거나 냄 없음)")
+
+    # 다음 라운드 핸디 계산
+    st.subheader("📝 다음 라운드 핸디 금액 계산")
+    n = len(players)
+    # 플레이어별 총 타수
+    total_scores = [sum(h["scores"][i] for h in st.session_state.history) for i in range(n)]
+    hand_matrix = [[0]*n for _ in range(n)]
+    for i,j in combinations(range(n),2):
+        diff = total_scores[j] - total_scores[i]
+        amt = diff * st.session_state.base_amount
+        hand_matrix[i][j] = -amt  # i에게는 j가 주는 돈
+        hand_matrix[j][i] = amt   # j에게는 i가 주는 돈
+
+    df_hand = pd.DataFrame(hand_matrix, index=players, columns=players)
+    st.write(f"기본 타당 금액: {st.session_state.base_amount}원")
+    st.dataframe(df_hand.style.format("{:,.0f}"))
+
     if st.button("새 라운드 시작"):
         st.session_state.total = [0,0,0,0]
         st.session_state.hole = 1
