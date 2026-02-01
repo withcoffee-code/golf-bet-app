@@ -28,26 +28,18 @@ if "max_per_stroke" not in st.session_state:
     st.session_state.max_per_stroke = 20000
 if "apply_max_toggle" not in st.session_state:
     st.session_state.apply_max_toggle = True
-if "first_input_focus" not in st.session_state:
-    st.session_state.first_input_focus = True  # 앱 시작 시 이름 입력란 초기화 플래그
 
 # ----------------------
-# 플레이어 이름 입력 (처음 시작 시만 탭 선택 시 초기화)
+# 플레이어 이름 입력
 # ----------------------
 st.subheader("👤 플레이어 이름 설정")
 
-def reset_first_focus():
-    if st.session_state.first_input_focus:
-        for i in range(4):
-            st.session_state[f"player_input_{i}"] = ""
-        st.session_state.first_input_focus = False
+default_names = st.session_state.players
 
-default_names = ["A","B","C","D"]
-
-p1 = st.text_input("플레이어 1", default_names[0], key="player_input_0", on_change=reset_first_focus)
-p2 = st.text_input("플레이어 2", default_names[1], key="player_input_1", on_change=reset_first_focus)
-p3 = st.text_input("플레이어 3", default_names[2], key="player_input_2", on_change=reset_first_focus)
-p4 = st.text_input("플레이어 4", default_names[3], key="player_input_3", on_change=reset_first_focus)
+p1 = st.text_input("플레이어 1", default_names[0], key="player_input_0")
+p2 = st.text_input("플레이어 2", default_names[1], key="player_input_1")
+p3 = st.text_input("플레이어 3", default_names[2], key="player_input_2")
+p4 = st.text_input("플레이어 4", default_names[3], key="player_input_3")
 
 if st.button("이름 적용"):
     st.session_state.players = [p1,p2,p3,p4]
@@ -228,7 +220,6 @@ if st.button("🔄 전체 리셋"):
     st.session_state.hole = 1
     st.session_state.history = []
     st.session_state.prev_all_tie = False
-    st.session_state.first_input_focus = True
     st.success("전체 상태와 현재 홀이 초기화되었습니다!")
 
 # ----------------------
@@ -286,4 +277,3 @@ if st.session_state.hole > 18:
         st.session_state.hole = 1
         st.session_state.history = []
         st.session_state.prev_all_tie = False
-        st.session_state.first_input_focus = True
