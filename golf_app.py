@@ -152,7 +152,30 @@ if st.button("이번 홀 계산"):
 
     st.session_state.prev_all_tie = all_tie
 
-    # 이번 홀 결과 그리드
+    # ----------------------
+    # 1️⃣ 처리 과정 표시
+    # ----------------------
+    st.subheader(f"📝 홀 {st.session_state.hole} 처리 과정")
+
+    # 1. 타수 차 계산
+    st.markdown("**1️⃣ 타수 차 계산**")
+    for i, s in enumerate(scores):
+        diff = s - par
+        st.write(f"{players[i]}: 스코어 {score_labels[i]} → 타수 차 {diff:+}")
+
+    # 2. 버디/이글 보너스 적용
+    st.markdown("**2️⃣ 버디/이글 보너스 적용**")
+    for i, r in enumerate(reasons):
+        st.write(f"{players[i]}: {r}")
+
+    # 3. 배판/배배판 적용
+    st.markdown("**3️⃣ 배판/배배판 적용**")
+    st.write(batch_reason_str)
+
+    # ----------------------
+    # 이번 홀 최종 금액 정리
+    # ----------------------
+    st.subheader("💰 이번 홀 최종 정리")
     hole_data = []
     for i,p in enumerate(players):
         status = "받음" if totals[i] < 0 else "냄" if totals[i] > 0 else "0원"
@@ -160,18 +183,8 @@ if st.button("이번 홀 계산"):
         hole_data.append([p, score_labels[i], status, f"{amt:,}원"])
 
     df_hole = pd.DataFrame(hole_data, columns=["플레이어","스코어","상태","이번 홀 금액"])
-    st.subheader(f"🏌️ 홀 {st.session_state.hole} 결과")
-
-    # 배판 + 보너스 설명
-    bonus_text = []
-    for i,r in enumerate(reasons):
-        bonus_text.append(f"{players[i]}: {r}")
-    description = f"**기본금액:** {st.session_state.base_amount:,}원  \n"
-    description += f"**배판 설명:**  \n{batch_reason_str}  \n"
-    description += "**버디/이글 보너스:**  \n" + "\n".join(bonus_text)
-    st.markdown(description.replace("\n","  \n"))
-
     st.dataframe(df_hole)
+
     st.session_state.hole += 1
 
 # ----------------------
