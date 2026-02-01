@@ -1,7 +1,6 @@
 import streamlit as st
 from itertools import combinations
 from collections import Counter
-import pandas as pd
 
 # ----------------------
 # 페이지 설정
@@ -55,7 +54,7 @@ st.session_state.max_amount = st.sidebar.number_input(
 use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 
 # ----------------------
-# 현재 홀 점수 입력 (드롭다운, 기본값 파)
+# 현재 홀 점수 입력
 # ----------------------
 st.subheader(f"🏌️ 현재 홀: {st.session_state.hole} / 18")
 par = st.selectbox("파", [3,4,5])
@@ -76,7 +75,7 @@ st.write("🏌️ 스코어 선택:")
 for i, p in enumerate(players):
     sel = st.selectbox(f"{p} 스코어", list(score_mapping.keys()), index=2, key=f"score_{p}_{st.session_state.hole}")
     scores.append(par + score_mapping[sel])
-    score_labels.append(sel)  # 결과 출력용 label 저장
+    score_labels.append(sel)
 
 # ----------------------
 # 1:1 + 배판 계산 함수
@@ -167,10 +166,6 @@ if st.button("이번 홀 계산"):
         else:
             st.write(f"→ {totals[i]:,}원 냄")
 
-    df = pd.DataFrame(matrix, index=players, columns=players)
-    st.subheader("💰 1:1 금액 매트릭스 (이번 홀)")
-    st.dataframe(df.style.format("{:,.0f}"))
-
 # ----------------------
 # 이전 홀 되돌리기
 # ----------------------
@@ -192,6 +187,20 @@ if st.button("🔄 전체 리셋"):
     st.success("전체 상태가 초기화되었습니다!")
 
 # ----------------------
+# 현재 누적 총액 표시 (벌었음/냄)
+# ----------------------
+st.divider()
+st.subheader("📊 현재 누적 총액")
+for i, p in enumerate(players):
+    amt = st.session_state.total[i]
+    if amt < 0:
+        st.write(f"{p}: {abs(amt):,}원 벌음")
+    elif amt > 0:
+        st.write(f"{p}: {amt:,}원 냄")
+    else:
+        st.write(f"{p}: 0원 (벌거나 냄 없음)")
+
+# ----------------------
 # 최종 정산
 # ----------------------
 if st.session_state.hole > 18:
@@ -206,18 +215,3 @@ if st.session_state.hole > 18:
         st.session_state.hole = 1
         st.session_state.history = []
         st.session_state.prev_all_tie = False
-
-# ----------------------
-# 현재 누적 1:1 매트릭스
-# ----------------------
-if st.session_state.history:
-    n = len(players)
-    cumulative_matrix = [[0]*n for _ in range(n)]
-    for h in st.session_state.history:
-        for i in range(n):
-            for j in range(n):
-                cumulative_matrix[i][j] += h["matrix"][i][j]
-
-    st.divider()
-    st.subheader("📊 현재 누적 1:1 금액 매트릭스")
-    st.dataframe(pd.DataFrame(cumulative_matrix, index=players, columns=players).style.format("{:,.0f}"))
