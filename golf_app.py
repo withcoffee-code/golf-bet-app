@@ -83,28 +83,25 @@ for i, p in enumerate(players):
 # ----------------------
 def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     n = len(scores)
-    adj_scores = []
     multipliers = []
     reasons = []
 
     for s in scores:
         diff = s - par
+        multiplier = 1
         reason = []
-        if diff == -1:
-            diff -= 1
-            multiplier = 2
+        if diff == -1:  # 버디
+            multiplier = 2  # 배판 + 한타
             reason.append("버디 → 한타 추가, 배판")
-        elif diff <= -2:
-            diff -= 2
-            multiplier = 4
+        elif diff <= -2:  # 이글
+            multiplier = 4  # 배배판 + 두타
             reason.append("이글 → 두타 추가, 배배판")
         else:
-            multiplier = 1
             reason.append("일반")
-        adj_scores.append(diff)
         multipliers.append(multiplier)
         reasons.append(", ".join(reason))
 
+    # 배판 판단: 3명 이상 동타, 전홀 전원동타, 이번홀 버디/이글
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
@@ -119,14 +116,15 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
 
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
-        return [0]*n, money_matrix, all_tie, reasons, batch_reason_str
+        total_per_player = [0]*n
+        return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
+    # 금액 매트릭스 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
-        multiplier = max(multipliers[i], multipliers[j]) * batch_multiplier
-        diff = adj_scores[j] - adj_scores[i]
-        amt = diff * base_amount * multiplier
-        if use_max:
+        diff = scores[j] - scores[i]  # 실제 타수 차이
+        amt = diff * base_amount * max(multipliers[i], multipliers[j]) * batch_multiplier
+        if use_max_amount:
             amt = max(-max_amount, min(max_amount, amt))
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
@@ -135,7 +133,7 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
 # ----------------------
-# 이번 홀 계산 (그리드)
+# 이번 홀 계산
 # ----------------------
 if st.button("이번 홀 계산"):
     totals, matrix, all_tie, reasons, batch_reason_str = calculate_hole(
