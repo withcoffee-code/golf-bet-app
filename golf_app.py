@@ -59,7 +59,26 @@ use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 # ----------------------
 st.subheader(f"🏌️ 현재 홀: {st.session_state.hole} / 18")
 par = st.selectbox("파", [3,4,5])
-scores = [st.number_input(f"{p}",1,10,par) for p in players]
+
+# 스코어 버튼
+score_mapping = {
+    "이글": -2,
+    "버디": -1,
+    "파": 0,
+    "보기": 1,
+    "더블": 2,
+    "트리플": 3,
+    "쿼드러플": 4
+}
+
+scores = [0]*4
+st.write("🏌️ 스코어 선택:")
+for i, p in enumerate(players):
+    st.write(f"{p}")
+    cols = st.columns(len(score_mapping))
+    for j, (label, val) in enumerate(score_mapping.items()):
+        if cols[j].button(label, key=f"{p}_{label}_{st.session_state.hole}"):
+            scores[i] = par + val
 
 # ----------------------
 # 1:1 + 배판 계산 함수 (이글 배배판, 두타 보너스, 최대금액 선택 가능)
@@ -68,32 +87,48 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     n = len(scores)
     adj_scores = []
     multipliers = []
+    reasons = []
 
     # 버디/이글 자동 감지
     for s in scores:
         diff = s - par
+        reason = []
         if diff == -1:  # 버디
-            diff -= 1  # 한타 추가
-            multiplier = 2  # 배판
+            diff -= 1
+            multiplier = 2
+            reason.append("버디 → 한타 추가, 배판")
         elif diff <= -2:  # 이글
-            diff -= 2  # 두타 추가
-            multiplier = 4  # 배배판
+            diff -= 2
+            multiplier = 4
+            reason.append("이글 → 두타 추가, 배배판")
         else:
             multiplier = 1
+            reason.append("일반")
         adj_scores.append(diff)
         multipliers.append(multiplier)
+        reasons.append(", ".join(reason))
 
-    # 배판 결정 (동타 3명 이상, 전홀 동타, 이번 홀 버디/이글)
+    # 배판 결정
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
     any_birdie_eagle = any((s - par) <= -1 for s in scores)
     batch_multiplier = 2 if tie_three or prev_all_tie or any_birdie_eagle else 1
+    batch_reason = []
+    if tie_three:
+        batch_reason.append("3명 이상 동타 → 배판")
+    if prev_all_tie:
+        batch_reason.append("전홀 동타 → 배판")
+    if any_birdie_eagle:
+        batch_reason.append("이번 홀 버디/이글 → 배판")
+    if not batch_reason:
+        batch_reason.append("배판 없음")
+    batch_reason_str = ", ".join(batch_reason)
 
     # 모든 플레이어 동타 = 금액 0
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
-        return [0]*n, money_matrix, all_tie
+        return [0]*n, money_matrix, all_tie, reasons, batch_reason_str
 
     # 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
@@ -107,13 +142,13 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
         money_matrix[j][i] = amt
 
     total_per_player = [sum(row) for row in money_matrix]
-    return total_per_player, money_matrix, all_tie
+    return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
 # ----------------------
 # 이번 홀 계산
 # ----------------------
 if st.button("이번 홀 계산"):
-    totals, matrix, all_tie = calculate_hole(
+    totals, matrix, all_tie, reasons, batch_reason_str = calculate_hole(
         scores, par, st.session_state.prev_all_tie,
         st.session_state.base_amount, st.session_state.max_amount,
         use_max_amount
@@ -136,11 +171,13 @@ if st.button("이번 홀 계산"):
 
     # 결과 출력
     st.subheader(f"홀 {st.session_state.hole-1} 결과")
+    st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
     for i,p in enumerate(players):
+        st.write(f"{p}: 스코어={scores[i]}, {reasons[i]}")
         if totals[i] < 0:
-            st.write(f"{p}: {abs(totals[i]):,}원 받음")
+            st.write(f"→ {abs(totals[i]):,}원 받음")
         else:
-            st.write(f"{p}: {totals[i]:,}원 냄")
+            st.write(f"→ {totals[i]:,}원 냄")
 
     # 1:1 시각화 매트릭스
     df = pd.DataFrame(matrix, index=players, columns=players)
