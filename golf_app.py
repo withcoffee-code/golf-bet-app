@@ -6,7 +6,7 @@ import pandas as pd
 # ----------------------
 # 페이지 설정
 # ----------------------
-st.set_page_config(page_title="골프 내기 계산기 (최종판)", layout="centered")
+st.set_page_config(page_title="골프 내기 계산기 (완전판)", layout="centered")
 st.title("⛳ 골프 내기 계산기 (완전판)")
 
 # ----------------------
@@ -60,28 +60,26 @@ use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 st.subheader(f"🏌️ 현재 홀: {st.session_state.hole} / 18")
 par = st.selectbox("파", [3,4,5])
 
-# 스코어 버튼
-score_mapping = {
-    "이글": -2,
-    "버디": -1,
-    "파": 0,
-    "보기": 1,
-    "더블": 2,
-    "트리플": 3,
-    "쿼드러플": 4
-}
-
+# 버튼 및 드롭다운 입력
+score_buttons = {"버디": -1, "파": 0, "보기": 1, "더블": 2}
+score_dropdown = {"이글": -2, "트리플": 3, "쿼드러플": 4}
 scores = [0]*4
+
 st.write("🏌️ 스코어 선택:")
 for i, p in enumerate(players):
     st.write(f"{p}")
-    cols = st.columns(len(score_mapping))
-    for j, (label, val) in enumerate(score_mapping.items()):
+    cols = st.columns(len(score_buttons))
+    clicked = False
+    for j, (label, val) in enumerate(score_buttons.items()):
         if cols[j].button(label, key=f"{p}_{label}_{st.session_state.hole}"):
             scores[i] = par + val
+            clicked = True
+    if not clicked:
+        sel = st.selectbox(f"기타 스코어 선택 ({p})", list(score_dropdown.keys()), key=f"drop_{p}_{st.session_state.hole}")
+        scores[i] = par + score_dropdown[sel]
 
 # ----------------------
-# 1:1 + 배판 계산 함수 (이글 배배판, 두타 보너스, 최대금액 선택 가능)
+# 1:1 + 배판 계산 함수
 # ----------------------
 def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     n = len(scores)
@@ -89,15 +87,14 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     multipliers = []
     reasons = []
 
-    # 버디/이글 자동 감지
     for s in scores:
         diff = s - par
         reason = []
-        if diff == -1:  # 버디
+        if diff == -1:
             diff -= 1
             multiplier = 2
             reason.append("버디 → 한타 추가, 배판")
-        elif diff <= -2:  # 이글
+        elif diff <= -2:
             diff -= 2
             multiplier = 4
             reason.append("이글 → 두타 추가, 배배판")
@@ -108,29 +105,22 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
         multipliers.append(multiplier)
         reasons.append(", ".join(reason))
 
-    # 배판 결정
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
     any_birdie_eagle = any((s - par) <= -1 for s in scores)
     batch_multiplier = 2 if tie_three or prev_all_tie or any_birdie_eagle else 1
     batch_reason = []
-    if tie_three:
-        batch_reason.append("3명 이상 동타 → 배판")
-    if prev_all_tie:
-        batch_reason.append("전홀 동타 → 배판")
-    if any_birdie_eagle:
-        batch_reason.append("이번 홀 버디/이글 → 배판")
-    if not batch_reason:
-        batch_reason.append("배판 없음")
+    if tie_three: batch_reason.append("3명 이상 동타 → 배판")
+    if prev_all_tie: batch_reason.append("전홀 동타 → 배판")
+    if any_birdie_eagle: batch_reason.append("이번 홀 버디/이글 → 배판")
+    if not batch_reason: batch_reason.append("배판 없음")
     batch_reason_str = ", ".join(batch_reason)
 
-    # 모든 플레이어 동타 = 금액 0
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
         return [0]*n, money_matrix, all_tie, reasons, batch_reason_str
 
-    # 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
         multiplier = max(multipliers[i], multipliers[j]) * batch_multiplier
@@ -154,11 +144,9 @@ if st.button("이번 홀 계산"):
         use_max_amount
     )
 
-    # 누적 합산
     for i in range(4):
         st.session_state.total[i] += totals[i]
 
-    # 기록
     st.session_state.history.append({
         "hole": st.session_state.hole,
         "scores": scores,
@@ -169,7 +157,6 @@ if st.button("이번 홀 계산"):
     st.session_state.prev_all_tie = all_tie
     st.session_state.hole += 1
 
-    # 결과 출력
     st.subheader(f"홀 {st.session_state.hole-1} 결과")
     st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
     for i,p in enumerate(players):
@@ -179,7 +166,6 @@ if st.button("이번 홀 계산"):
         else:
             st.write(f"→ {totals[i]:,}원 냄")
 
-    # 1:1 시각화 매트릭스
     df = pd.DataFrame(matrix, index=players, columns=players)
     st.subheader("💰 1:1 금액 매트릭스 (이번 홀)")
     st.dataframe(df.style.format("{:,.0f}"))
