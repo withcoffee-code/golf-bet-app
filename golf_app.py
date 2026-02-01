@@ -6,8 +6,8 @@ import pandas as pd
 # ----------------------
 # 페이지 설정
 # ----------------------
-st.set_page_config(page_title="골프 내기 계산기 (완전판)", layout="centered")
-st.title("⛳ 골프 내기 계산기 (버디/이글 자동 감지 + 배판 적용)")
+st.set_page_config(page_title="골프 내기 계산기 (최종판)", layout="centered")
+st.title("⛳ 골프 내기 계산기 (완전판)")
 
 # ----------------------
 # 상태 저장
@@ -52,6 +52,7 @@ st.session_state.base_amount = st.sidebar.number_input(
 st.session_state.max_amount = st.sidebar.number_input(
     "홀당 최대 금액", min_value=5000, step=5000, value=st.session_state.max_amount
 )
+use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 
 # ----------------------
 # 현재 홀 점수 입력
@@ -61,29 +62,35 @@ par = st.selectbox("파", [3,4,5])
 scores = [st.number_input(f"{p}",1,10,par) for p in players]
 
 # ----------------------
-# 1:1 + 배판 계산 함수
+# 1:1 + 배판 계산 함수 (이글 배배판, 두타 보너스, 최대금액 선택 가능)
 # ----------------------
-def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount):
+def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     n = len(scores)
-    # 버디/이글 자동 감지
     adj_scores = []
+    multipliers = []
+
+    # 버디/이글 자동 감지
     for s in scores:
         diff = s - par
-        # 버디/이글 보너스 적용
         if diff == -1:  # 버디
-            diff -= 1
+            diff -= 1  # 한타 추가
+            multiplier = 2  # 배판
         elif diff <= -2:  # 이글
-            diff -= 2
+            diff -= 2  # 두타 추가
+            multiplier = 4  # 배배판
+        else:
+            multiplier = 1
         adj_scores.append(diff)
+        multipliers.append(multiplier)
 
-    # 배판 결정
+    # 배판 결정 (동타 3명 이상, 전홀 동타, 이번 홀 버디/이글)
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
     any_birdie_eagle = any((s - par) <= -1 for s in scores)
     batch_multiplier = 2 if tie_three or prev_all_tie or any_birdie_eagle else 1
 
-    # 모든 플레이어 점수 같으면 금액 0
+    # 모든 플레이어 동타 = 금액 0
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
         return [0]*n, money_matrix, all_tie
@@ -91,9 +98,11 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount):
     # 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
+        multiplier = max(multipliers[i], multipliers[j]) * batch_multiplier
         diff = adj_scores[j] - adj_scores[i]
-        amt = diff * base_amount * batch_multiplier
-        amt = max(-max_amount, min(max_amount, amt))
+        amt = diff * base_amount * multiplier
+        if use_max:
+            amt = max(-max_amount, min(max_amount, amt))
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
 
@@ -106,7 +115,8 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount):
 if st.button("이번 홀 계산"):
     totals, matrix, all_tie = calculate_hole(
         scores, par, st.session_state.prev_all_tie,
-        st.session_state.base_amount, st.session_state.max_amount
+        st.session_state.base_amount, st.session_state.max_amount,
+        use_max_amount
     )
 
     # 누적 합산
@@ -132,7 +142,6 @@ if st.button("이번 홀 계산"):
         else:
             st.write(f"{p}: {totals[i]:,}원 냄")
 
-    # ----------------------
     # 1:1 시각화 매트릭스
     df = pd.DataFrame(matrix, index=players, columns=players)
     st.subheader("💰 1:1 금액 매트릭스 (이번 홀)")
