@@ -55,7 +55,7 @@ st.session_state.max_amount = st.sidebar.number_input(
 use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 
 # ----------------------
-# 현재 홀 점수 입력 (드롭다운)
+# 현재 홀 점수 입력 (드롭다운, 기본값 파)
 # ----------------------
 st.subheader(f"🏌️ 현재 홀: {st.session_state.hole} / 18")
 par = st.selectbox("파", [3,4,5])
@@ -73,7 +73,8 @@ score_mapping = {
 scores = []
 st.write("🏌️ 스코어 선택:")
 for i, p in enumerate(players):
-    sel = st.selectbox(f"{p} 스코어", list(score_mapping.keys()), key=f"score_{p}_{st.session_state.hole}")
+    # 기본값 '파' (index=2)
+    sel = st.selectbox(f"{p} 스코어", list(score_mapping.keys()), index=2, key=f"score_{p}_{st.session_state.hole}")
     scores.append(par + score_mapping[sel])
 
 # ----------------------
