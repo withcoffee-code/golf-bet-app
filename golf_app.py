@@ -182,6 +182,16 @@ if st.button("⬅ 이전 홀 되돌리기"):
         st.session_state.hole -= 1
 
 # ----------------------
+# 전체 리셋 버튼
+# ----------------------
+if st.button("🔄 전체 리셋"):
+    st.session_state.total = [0,0,0,0]
+    st.session_state.hole = 1
+    st.session_state.history = []
+    st.session_state.prev_all_tie = False
+    st.success("전체 상태가 초기화되었습니다!")
+
+# ----------------------
 # 최종 정산
 # ----------------------
 if st.session_state.hole > 18:
@@ -198,12 +208,16 @@ if st.session_state.hole > 18:
         st.session_state.prev_all_tie = False
 
 # ----------------------
-# 현재 누적
+# 현재 누적 1:1 매트릭스
 # ----------------------
-st.divider()
-st.subheader("📊 현재 누적")
-for i,p in enumerate(players):
-    if st.session_state.total[i] < 0:
-        st.write(f"{p}: {abs(st.session_state.total[i]):,}원 받는 중")
-    else:
-        st.write(f"{p}: {st.session_state.total[i]:,}원 내는 중")
+if st.session_state.history:
+    n = len(players)
+    cumulative_matrix = [[0]*n for _ in range(n)]
+    for h in st.session_state.history:
+        for i in range(n):
+            for j in range(n):
+                cumulative_matrix[i][j] += h["matrix"][i][j]
+
+    st.divider()
+    st.subheader("📊 현재 누적 1:1 금액 매트릭스")
+    st.dataframe(pd.DataFrame(cumulative_matrix, index=players, columns=players).style.format("{:,.0f}"))
