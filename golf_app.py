@@ -248,7 +248,7 @@ for i, p in enumerate(players):
         st.write(f"{p}: 0원 (벌거나 냄 없음)")
 
 # ----------------------
-# 최종 정산 + 다음 라운드 핸디 계산
+# 최종 정산 + 다음 라운드 핸디 계산 (사람별 합산)
 # ----------------------
 if st.session_state.hole > 18:
     st.subheader("🎉 라운드 종료! 최종 정산")
@@ -261,8 +261,7 @@ if st.session_state.hole > 18:
         else:
             st.write(f"{p}: 0원 (벌거나 냄 없음)")
 
-    # 다음 라운드 핸디 계산
-    st.subheader("📝 다음 라운드 핸디 금액 계산")
+    st.subheader("📝 다음 라운드 핸디 총액 계산")
     n = len(players)
     total_scores = [sum(h["scores"][i] for h in st.session_state.history) for i in range(n)]
     hand_matrix = [[0]*n for _ in range(n)]
@@ -272,9 +271,17 @@ if st.session_state.hole > 18:
         hand_matrix[i][j] = -amt
         hand_matrix[j][i] = amt
 
-    df_hand = pd.DataFrame(hand_matrix, index=players, columns=players)
+    hand_totals = [sum(row) for row in hand_matrix]
+
+    hand_data = []
+    for i,p in enumerate(players):
+        amt = hand_totals[i]
+        status = "받음" if amt < 0 else "냄" if amt > 0 else "0원"
+        hand_data.append([p, total_scores[i], status, f"{abs(amt):,}원"])
+
+    df_hand = pd.DataFrame(hand_data, columns=["플레이어","총 타수","상태","핸디 총액"])
     st.write(f"기본 타당 금액: {st.session_state.base_amount}원")
-    st.dataframe(df_hand.style.format("{:,.0f}"))
+    st.dataframe(df_hand)
 
     if st.button("새 라운드 시작"):
         st.session_state.total = [0,0,0,0]
