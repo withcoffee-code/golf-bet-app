@@ -6,7 +6,7 @@ import pandas as pd
 # ----------------------
 # 페이지 설정
 # ----------------------
-st.set_page_config(page_title="골프 내기 계산기 (완전판)", layout="centered")
+st.set_page_config(page_title="골프 내기 계산기 (최종판)", layout="centered")
 st.title("⛳ 골프 내기 계산기 (완전판)")
 
 # ----------------------
@@ -55,28 +55,26 @@ st.session_state.max_amount = st.sidebar.number_input(
 use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 
 # ----------------------
-# 현재 홀 점수 입력
+# 현재 홀 점수 입력 (드롭다운)
 # ----------------------
 st.subheader(f"🏌️ 현재 홀: {st.session_state.hole} / 18")
 par = st.selectbox("파", [3,4,5])
 
-# 버튼 및 드롭다운 입력
-score_buttons = {"버디": -1, "파": 0, "보기": 1, "더블": 2}
-score_dropdown = {"이글": -2, "트리플": 3, "쿼드러플": 4}
-scores = [0]*4
+score_mapping = {
+    "이글": -2,
+    "버디": -1,
+    "파": 0,
+    "보기": 1,
+    "더블": 2,
+    "트리플": 3,
+    "쿼드러플": 4
+}
 
+scores = []
 st.write("🏌️ 스코어 선택:")
 for i, p in enumerate(players):
-    st.write(f"{p}")
-    cols = st.columns(len(score_buttons))
-    clicked = False
-    for j, (label, val) in enumerate(score_buttons.items()):
-        if cols[j].button(label, key=f"{p}_{label}_{st.session_state.hole}"):
-            scores[i] = par + val
-            clicked = True
-    if not clicked:
-        sel = st.selectbox(f"기타 스코어 선택 ({p})", list(score_dropdown.keys()), key=f"drop_{p}_{st.session_state.hole}")
-        scores[i] = par + score_dropdown[sel]
+    sel = st.selectbox(f"{p} 스코어", list(score_mapping.keys()), key=f"score_{p}_{st.session_state.hole}")
+    scores.append(par + score_mapping[sel])
 
 # ----------------------
 # 1:1 + 배판 계산 함수
