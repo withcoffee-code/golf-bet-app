@@ -26,6 +26,8 @@ if "base_amount" not in st.session_state:
     st.session_state.base_amount = 5000
 if "max_per_stroke" not in st.session_state:
     st.session_state.max_per_stroke = 20000
+if "apply_max_toggle" not in st.session_state:
+    st.session_state.apply_max_toggle = True
 
 # ----------------------
 # 플레이어 이름 입력
@@ -49,9 +51,17 @@ st.sidebar.header("⚙️ 룰 설정")
 st.session_state.base_amount = st.sidebar.number_input(
     "기준금액 (타당)", min_value=1000, step=1000, value=st.session_state.base_amount
 )
-st.session_state.max_per_stroke = st.sidebar.number_input(
-    "타당 최대 금액 (1타 기준)", min_value=1000, step=1000, value=st.session_state.max_per_stroke
+
+st.session_state.apply_max_toggle = st.sidebar.checkbox(
+    "타당 최대 금액 적용", value=st.session_state.apply_max_toggle
 )
+
+if st.session_state.apply_max_toggle:
+    st.session_state.max_per_stroke = st.sidebar.number_input(
+        "타당 최대 금액 (1타 기준)", min_value=1000, step=1000, value=st.session_state.max_per_stroke
+)
+else:
+    st.session_state.max_per_stroke = None
 
 # ----------------------
 # 현재 홀 점수 입력
@@ -118,11 +128,13 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke):
         total_per_player = [0]*n
         return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
-    # 금액 매트릭스 계산 (타당 최대금액 적용)
+    # 금액 매트릭스 계산 (타당 최대금액 적용 여부)
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
         diff = scores[j] - scores[i]  # 실제 타수 차이
-        per_stroke_amount = min(base_amount * max(multipliers[i], multipliers[j]), max_per_stroke)
+        per_stroke_amount = base_amount * max(multipliers[i], multipliers[j])
+        if max_per_stroke:  # 토글 ON이면 최대금액 적용
+            per_stroke_amount = min(per_stroke_amount, max_per_stroke)
         amt = diff * per_stroke_amount * batch_multiplier
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
@@ -156,19 +168,13 @@ if st.button("이번 홀 계산"):
     # 1️⃣ 처리 과정 표시
     # ----------------------
     st.subheader(f"📝 홀 {st.session_state.hole} 처리 과정")
-
-    # 1. 타수 차 계산
     st.markdown("**1️⃣ 타수 차 계산**")
     for i, s in enumerate(scores):
         diff = s - par
         st.write(f"{players[i]}: 스코어 {score_labels[i]} → 타수 차 {diff:+}")
-
-    # 2. 버디/이글 보너스 적용
     st.markdown("**2️⃣ 버디/이글 보너스 적용**")
     for i, r in enumerate(reasons):
         st.write(f"{players[i]}: {r}")
-
-    # 3. 배판/배배판 적용
     st.markdown("**3️⃣ 배판/배배판 적용**")
     st.write(batch_reason_str)
 
@@ -181,7 +187,6 @@ if st.button("이번 홀 계산"):
         status = "받음" if totals[i] < 0 else "냄" if totals[i] > 0 else "0원"
         amt = abs(totals[i])
         hole_data.append([p, score_labels[i], status, f"{amt:,}원"])
-
     df_hole = pd.DataFrame(hole_data, columns=["플레이어","스코어","상태","이번 홀 금액"])
     st.dataframe(df_hole)
 
