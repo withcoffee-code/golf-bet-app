@@ -30,13 +30,18 @@ if "apply_max_toggle" not in st.session_state:
     st.session_state.apply_max_toggle = True
 
 # ----------------------
-# 플레이어 이름 입력
+# 플레이어 이름 입력 (탭 선택 시 초기화)
 # ----------------------
 st.subheader("👤 플레이어 이름 설정")
-p1 = st.text_input("플레이어 1", st.session_state.players[0])
-p2 = st.text_input("플레이어 2", st.session_state.players[1])
-p3 = st.text_input("플레이어 3", st.session_state.players[2])
-p4 = st.text_input("플레이어 4", st.session_state.players[3])
+
+def reset_player_input():
+    for i in range(4):
+        st.session_state[f"player_input_{i}"] = ""
+
+p1 = st.text_input("플레이어 1", st.session_state.players[0], key="player_input_0", on_change=reset_player_input)
+p2 = st.text_input("플레이어 2", st.session_state.players[1], key="player_input_1", on_change=reset_player_input)
+p3 = st.text_input("플레이어 3", st.session_state.players[2], key="player_input_2", on_change=reset_player_input)
+p4 = st.text_input("플레이어 4", st.session_state.players[3], key="player_input_3", on_change=reset_player_input)
 
 if st.button("이름 적용"):
     st.session_state.players = [p1,p2,p3,p4]
@@ -125,15 +130,11 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke, score
     # 3️⃣ 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
-        # 기본 타수 차
         diff = scores[j] - scores[i]
-
-        # 최종 타당 금액
         per_stroke_amount = base_amount * batch_multiplier
         if max_per_stroke:
             per_stroke_amount = min(per_stroke_amount, max_per_stroke)
 
-        # 1:1 버디/이글 보너스 적용
         bonus = 0
         if score_labels[i] == "버디":
             bonus += 1
@@ -177,9 +178,6 @@ if st.button("이번 홀 계산"):
 
     st.session_state.prev_all_tie = all_tie
 
-    # ----------------------
-    # 처리 과정 표시
-    # ----------------------
     st.subheader(f"📝 홀 {st.session_state.hole} 처리 과정")
     st.markdown("**1️⃣ 타수 차 계산**")
     for i, s in enumerate(scores):
@@ -199,9 +197,6 @@ if st.button("이번 홀 계산"):
     st.write(batch_reason_str)
     st.write(f"▶ 적용 배수: {batch_multiplier}배")
 
-    # ----------------------
-    # 이번 홀 최종 금액 정리
-    # ----------------------
     st.subheader("💰 이번 홀 최종 정리")
     hole_data = []
     for i,p in enumerate(players):
