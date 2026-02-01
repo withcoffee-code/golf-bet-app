@@ -5,13 +5,13 @@ from collections import Counter
 # 페이지 설정
 # ----------------------
 st.set_page_config(page_title="골프 내기 계산기", layout="centered")
-st.title("⛳ 골프 내기 계산기 (완전판, AI 없음)")
+st.title("⛳ 골프 내기 계산기 (최종판)")
 
 # ----------------------
 # 상태 저장
 # ----------------------
 if "total" not in st.session_state:
-    st.session_state.total = [0,0,0,0]
+    st.session_state.total = [0, 0, 0, 0]
 if "prev_all_tie" not in st.session_state:
     st.session_state.prev_all_tie = False
 if "hole" not in st.session_state:
@@ -58,7 +58,7 @@ scores = [
 # ----------------------
 # 계산 함수
 # ----------------------
-def calculate_hole_fixed(par, scores, prev_all_tie, base_amount, max_amount):
+def calculate_hole(par, scores, prev_all_tie, base_amount, max_amount):
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
@@ -67,12 +67,12 @@ def calculate_hole_fixed(par, scores, prev_all_tie, base_amount, max_amount):
     for s in scores:
         d = s - par
         personal_double = 0
-        if d == -1 and use_birdie_bonus:    # 버디 보너스
+        if d == -1 and use_birdie_bonus:
             personal_double += 1
-        elif d <= -2 and use_eagle_bonus:   # 이글 보너스
+        elif d <= -2 and use_eagle_bonus:
             personal_double += 2
 
-        # 동타/전홀 배판
+        # 배판 적용 (팀 기준)
         if tie_three:
             personal_double += 1
         if prev_all_tie:
@@ -82,14 +82,13 @@ def calculate_hole_fixed(par, scores, prev_all_tie, base_amount, max_amount):
         unit_money = min(base_amount * multiplier, max_amount)
 
         results.append(d * unit_money)
-
     return results, all_tie
 
 # ----------------------
 # 홀 계산
 # ----------------------
 if st.button("이번 홀 계산"):
-    results, all_tie = calculate_hole_fixed(
+    results, all_tie = calculate_hole(
         par, scores, st.session_state.prev_all_tie,
         st.session_state.base_amount, st.session_state.max_amount
     )
@@ -106,9 +105,9 @@ if st.button("이번 홀 계산"):
     st.session_state.prev_all_tie = all_tie
     st.session_state.hole += 1
 
-    # 이번 홀 결과 출력
+    # 결과 출력
     players = ["A","B","C","D"]
-    st.subheader("이번 홀 결과")
+    st.subheader(f"홀 {st.session_state.hole-1} 결과")
     for i,p in enumerate(players):
         if results[i] < 0:
             st.write(f"{p}: {abs(results[i]):,}원 받음")
@@ -141,7 +140,6 @@ if st.session_state.hole > 18:
         st.session_state.prev_all_tie = False
         st.session_state.hole = 1
         st.session_state.history = []
-        st.experimental_rerun()
 
 # ----------------------
 # 누적 정산
