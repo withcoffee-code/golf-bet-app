@@ -91,17 +91,17 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
         multiplier = 1
         reason = []
         if diff == -1:  # 버디
-            multiplier = 2  # 배판 + 한타
-            reason.append("버디 → 한타 추가, 배판")
+            multiplier = 2
+            reason.append("버디 → 한타 추가")
         elif diff <= -2:  # 이글
-            multiplier = 4  # 배배판 + 두타
-            reason.append("이글 → 두타 추가, 배배판")
+            multiplier = 4
+            reason.append("이글 → 두타 추가")
         else:
             reason.append("일반")
         multipliers.append(multiplier)
         reasons.append(", ".join(reason))
 
-    # 배판 판단: 3명 이상 동타, 전홀 전원동타, 이번홀 버디/이글
+    # 배판 판단
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
@@ -112,7 +112,7 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     if prev_all_tie: batch_reason.append("전홀 동타 → 배판")
     if any_birdie_eagle: batch_reason.append("이번 홀 버디/이글 → 배판")
     if not batch_reason: batch_reason.append("배판 없음")
-    batch_reason_str = ", ".join(batch_reason)
+    batch_reason_str = "\n".join(batch_reason)
 
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
@@ -124,7 +124,7 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
     for i,j in combinations(range(n),2):
         diff = scores[j] - scores[i]  # 실제 타수 차이
         amt = diff * base_amount * max(multipliers[i], multipliers[j]) * batch_multiplier
-        if use_max_amount:
+        if use_max:
             amt = max(-max_amount, min(max_amount, amt))
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
@@ -161,11 +161,20 @@ if st.button("이번 홀 계산"):
         status = "받음" if totals[i] < 0 else "냄" if totals[i] > 0 else "0원"
         amt = abs(totals[i])
         hole_data.append([p, score_labels[i], status, f"{amt:,}원"])
+
     df_hole = pd.DataFrame(hole_data, columns=["플레이어","스코어","상태","이번 홀 금액"])
     st.subheader(f"🏌️ 홀 {st.session_state.hole} 결과")
-    st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
-    st.dataframe(df_hole)
 
+    # 배판 + 보너스 설명
+    bonus_text = []
+    for i,r in enumerate(reasons):
+        bonus_text.append(f"{players[i]}: {r}")
+    description = f"**기본금액:** {st.session_state.base_amount:,}원  \n"
+    description += f"**배판 설명:**  \n{batch_reason_str}  \n"
+    description += "**버디/이글 보너스:**  \n" + "\n".join(bonus_text)
+    st.markdown(description.replace("\n","  \n"))
+
+    st.dataframe(df_hole)
     st.session_state.hole += 1
 
 # ----------------------
@@ -207,7 +216,6 @@ for i, p in enumerate(players):
 # ----------------------
 if st.session_state.hole > 18:
     st.subheader("🎉 라운드 종료! 최종 정산")
-    # 누적 총액
     for i,p in enumerate(players):
         amt = st.session_state.total[i]
         if amt < 0:
@@ -220,14 +228,13 @@ if st.session_state.hole > 18:
     # 다음 라운드 핸디 계산
     st.subheader("📝 다음 라운드 핸디 금액 계산")
     n = len(players)
-    # 플레이어별 총 타수
     total_scores = [sum(h["scores"][i] for h in st.session_state.history) for i in range(n)]
     hand_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
         diff = total_scores[j] - total_scores[i]
         amt = diff * st.session_state.base_amount
-        hand_matrix[i][j] = -amt  # i에게는 j가 주는 돈
-        hand_matrix[j][i] = amt   # j에게는 i가 주는 돈
+        hand_matrix[i][j] = -amt
+        hand_matrix[j][i] = amt
 
     df_hand = pd.DataFrame(hand_matrix, index=players, columns=players)
     st.write(f"기본 타당 금액: {st.session_state.base_amount}원")
