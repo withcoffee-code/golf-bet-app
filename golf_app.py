@@ -24,8 +24,8 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "base_amount" not in st.session_state:
     st.session_state.base_amount = 5000
-if "max_amount" not in st.session_state:
-    st.session_state.max_amount = 20000
+if "max_per_stroke" not in st.session_state:
+    st.session_state.max_per_stroke = 20000
 
 # ----------------------
 # 플레이어 이름 입력
@@ -49,10 +49,9 @@ st.sidebar.header("⚙️ 룰 설정")
 st.session_state.base_amount = st.sidebar.number_input(
     "기준금액 (타당)", min_value=1000, step=1000, value=st.session_state.base_amount
 )
-st.session_state.max_amount = st.sidebar.number_input(
-    "홀당 최대 금액", min_value=5000, step=5000, value=st.session_state.max_amount
+st.session_state.max_per_stroke = st.sidebar.number_input(
+    "타당 최대 금액 (1타 기준)", min_value=1000, step=1000, value=st.session_state.max_per_stroke
 )
-use_max_amount = st.sidebar.checkbox("홀당 최대 금액 적용", value=True)
 
 # ----------------------
 # 현재 홀 점수 입력
@@ -81,7 +80,7 @@ for i, p in enumerate(players):
 # ----------------------
 # 1:1 + 배판 계산 함수
 # ----------------------
-def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
+def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke):
     n = len(scores)
     multipliers = []
     reasons = []
@@ -119,13 +118,12 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
         total_per_player = [0]*n
         return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
 
-    # 금액 매트릭스 계산
+    # 금액 매트릭스 계산 (타당 최대금액 적용)
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
         diff = scores[j] - scores[i]  # 실제 타수 차이
-        amt = diff * base_amount * max(multipliers[i], multipliers[j]) * batch_multiplier
-        if use_max:
-            amt = max(-max_amount, min(max_amount, amt))
+        per_stroke_amount = min(base_amount * max(multipliers[i], multipliers[j]), max_per_stroke)
+        amt = diff * per_stroke_amount * batch_multiplier
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
 
@@ -138,8 +136,7 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_amount, use_max):
 if st.button("이번 홀 계산"):
     totals, matrix, all_tie, reasons, batch_reason_str = calculate_hole(
         scores, par, st.session_state.prev_all_tie,
-        st.session_state.base_amount, st.session_state.max_amount,
-        use_max_amount
+        st.session_state.base_amount, st.session_state.max_per_stroke
     )
 
     for i in range(4):
