@@ -90,28 +90,10 @@ for i, p in enumerate(players):
 # ----------------------
 # 홀 계산 함수
 # ----------------------
-def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke):
+def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke, score_labels):
     n = len(scores)
-    multipliers = []
-    reasons = []
 
-    # 1️⃣ 버디/이글 보너스 계산 → 각자 타수 보정
-    for s in scores:
-        diff = s - par
-        multiplier = 1
-        reason = []
-        if diff == -1:  # 버디
-            multiplier = 1  # 배판과 별도로 한타 보너스는 타수차 계산에서 반영
-            reason.append("버디 → 한타 보너스 적용")
-        elif diff <= -2:  # 이글
-            multiplier = 1
-            reason.append("이글 → 두타 보너스 적용")
-        else:
-            reason.append("일반")
-        multipliers.append(multiplier)
-        reasons.append(", ".join(reason))
-
-    # 2️⃣ 배판/배배판 적용 → 타당 금액 결정
+    # 1️⃣ 배판/배배판 적용 → 타당 금액 결정
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
@@ -134,47 +116,51 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke):
 
     batch_reason_str = "\n".join(batch_reason)
 
-    # 3️⃣ 모든 스코어 동일 → 금액 없음
+    # 2️⃣ 모든 스코어 동일 → 금액 없음
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
         total_per_player = [0]*n
-        return total_per_player, money_matrix, all_tie, reasons, batch_reason_str, batch_multiplier
+        return total_per_player, money_matrix, all_tie, batch_reason_str, batch_multiplier
 
-    # 4️⃣ 1:1 금액 계산
+    # 3️⃣ 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
-        # 타수 차 + 버디/이글 보너스
-        diff = (scores[j] - scores[i])
-        # A 버디이면 1타 추가, 이글이면 2타 추가
-        if score_labels[i] == "버디":
-            diff -= 1
-        elif score_labels[i] == "이글":
-            diff -= 2
-        if score_labels[j] == "버디":
-            diff += 1
-        elif score_labels[j] == "이글":
-            diff += 2
+        # 기본 타수 차
+        diff = scores[j] - scores[i]
 
         # 최종 타당 금액
         per_stroke_amount = base_amount * batch_multiplier
-        if max_per_stroke:  # 최대 금액 적용 토글
+        if max_per_stroke:
             per_stroke_amount = min(per_stroke_amount, max_per_stroke)
 
-        amt = diff * per_stroke_amount
+        # 1:1 버디/이글 보너스 적용
+        bonus = 0
+        if score_labels[i] == "버디":
+            bonus += 1
+        elif score_labels[i] == "이글":
+            bonus += 2
+        if score_labels[j] == "버디":
+            bonus -= 1
+        elif score_labels[j] == "이글":
+            bonus -= 2
+
+        total_diff = diff + bonus
+        amt = total_diff * per_stroke_amount
+
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
 
     total_per_player = [sum(row) for row in money_matrix]
-
-    return total_per_player, money_matrix, all_tie, reasons, batch_reason_str, batch_multiplier
+    return total_per_player, money_matrix, all_tie, batch_reason_str, batch_multiplier
 
 # ----------------------
 # 이번 홀 계산
 # ----------------------
 if st.button("이번 홀 계산"):
-    totals, matrix, all_tie, reasons, batch_reason_str, batch_multiplier = calculate_hole(
+    totals, matrix, all_tie, batch_reason_str, batch_multiplier = calculate_hole(
         scores, par, st.session_state.prev_all_tie,
-        st.session_state.base_amount, st.session_state.max_per_stroke
+        st.session_state.base_amount, st.session_state.max_per_stroke,
+        score_labels
     )
 
     for i in range(4):
@@ -200,9 +186,14 @@ if st.button("이번 홀 계산"):
         diff = s - par
         st.write(f"{players[i]}: 스코어 {score_labels[i]} → 기본 타수 차 {diff:+}")
 
-    st.markdown("**2️⃣ 버디/이글 보너스 적용**")
-    for i, r in enumerate(reasons):
-        st.write(f"{players[i]}: {r}")
+    st.markdown("**2️⃣ 버디/이글 보너스 적용 (1:1)**")
+    for i, label in enumerate(score_labels):
+        if label == "버디":
+            st.write(f"{players[i]}: 버디 → 상대에게 1타 추가 금액")
+        elif label == "이글":
+            st.write(f"{players[i]}: 이글 → 상대에게 2타 추가 금액")
+        else:
+            st.write(f"{players[i]}: 보너스 없음")
 
     st.markdown("**3️⃣ 배판/배배판 적용**")
     st.write(batch_reason_str)
