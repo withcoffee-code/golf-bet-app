@@ -6,8 +6,8 @@ import pandas as pd
 # ----------------------
 # 페이지 설정
 # ----------------------
-st.set_page_config(page_title="골프 내기 계산기 (최종판)", layout="centered")
-st.title("⛳ 골프 내기 계산기 (완전판)")
+st.set_page_config(page_title="Kevin 룰 계산기", layout="centered")
+st.title("⛳ Kevin 룰 계산기")
 
 # ----------------------
 # 상태 저장
@@ -71,11 +71,12 @@ score_mapping = {
 }
 
 scores = []
+score_labels = []
 st.write("🏌️ 스코어 선택:")
 for i, p in enumerate(players):
-    # 기본값 '파' (index=2)
     sel = st.selectbox(f"{p} 스코어", list(score_mapping.keys()), index=2, key=f"score_{p}_{st.session_state.hole}")
     scores.append(par + score_mapping[sel])
+    score_labels.append(sel)  # 결과 출력용 label 저장
 
 # ----------------------
 # 1:1 + 배판 계산 함수
@@ -149,6 +150,7 @@ if st.button("이번 홀 계산"):
     st.session_state.history.append({
         "hole": st.session_state.hole,
         "scores": scores,
+        "score_labels": score_labels,
         "matrix": matrix,
         "totals": totals
     })
@@ -159,7 +161,7 @@ if st.button("이번 홀 계산"):
     st.subheader(f"홀 {st.session_state.hole-1} 결과")
     st.write(f"기본금액: {st.session_state.base_amount}원, 배판 설명: {batch_reason_str}")
     for i,p in enumerate(players):
-        st.write(f"{p}: 스코어={scores[i]}, {reasons[i]}")
+        st.write(f"{p}: 스코어={score_labels[i]}, {reasons[i]}")
         if totals[i] < 0:
             st.write(f"→ {abs(totals[i]):,}원 받음")
         else:
