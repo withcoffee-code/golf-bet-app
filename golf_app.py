@@ -28,20 +28,26 @@ if "max_per_stroke" not in st.session_state:
     st.session_state.max_per_stroke = 20000
 if "apply_max_toggle" not in st.session_state:
     st.session_state.apply_max_toggle = True
+if "first_input_focus" not in st.session_state:
+    st.session_state.first_input_focus = True  # 앱 시작 시 이름 입력란 초기화 플래그
 
 # ----------------------
-# 플레이어 이름 입력 (탭 선택 시 초기화)
+# 플레이어 이름 입력 (처음 시작 시만 탭 선택 시 초기화)
 # ----------------------
 st.subheader("👤 플레이어 이름 설정")
 
-def reset_player_input():
-    for i in range(4):
-        st.session_state[f"player_input_{i}"] = ""
+def reset_first_focus():
+    if st.session_state.first_input_focus:
+        for i in range(4):
+            st.session_state[f"player_input_{i}"] = ""
+        st.session_state.first_input_focus = False
 
-p1 = st.text_input("플레이어 1", st.session_state.players[0], key="player_input_0", on_change=reset_player_input)
-p2 = st.text_input("플레이어 2", st.session_state.players[1], key="player_input_1", on_change=reset_player_input)
-p3 = st.text_input("플레이어 3", st.session_state.players[2], key="player_input_2", on_change=reset_player_input)
-p4 = st.text_input("플레이어 4", st.session_state.players[3], key="player_input_3", on_change=reset_player_input)
+default_names = ["A","B","C","D"]
+
+p1 = st.text_input("플레이어 1", default_names[0], key="player_input_0", on_change=reset_first_focus)
+p2 = st.text_input("플레이어 2", default_names[1], key="player_input_1", on_change=reset_first_focus)
+p3 = st.text_input("플레이어 3", default_names[2], key="player_input_2", on_change=reset_first_focus)
+p4 = st.text_input("플레이어 4", default_names[3], key="player_input_3", on_change=reset_first_focus)
 
 if st.button("이름 적용"):
     st.session_state.players = [p1,p2,p3,p4]
@@ -97,8 +103,6 @@ for i, p in enumerate(players):
 # ----------------------
 def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke, score_labels):
     n = len(scores)
-
-    # 1️⃣ 배판/배배판 적용 → 타당 금액 결정
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
@@ -121,13 +125,11 @@ def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke, score
 
     batch_reason_str = "\n".join(batch_reason)
 
-    # 2️⃣ 모든 스코어 동일 → 금액 없음
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
         total_per_player = [0]*n
         return total_per_player, money_matrix, all_tie, batch_reason_str, batch_multiplier
 
-    # 3️⃣ 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
         diff = scores[j] - scores[i]
@@ -226,6 +228,7 @@ if st.button("🔄 전체 리셋"):
     st.session_state.hole = 1
     st.session_state.history = []
     st.session_state.prev_all_tie = False
+    st.session_state.first_input_focus = True
     st.success("전체 상태와 현재 홀이 초기화되었습니다!")
 
 # ----------------------
@@ -283,3 +286,4 @@ if st.session_state.hole > 18:
         st.session_state.hole = 1
         st.session_state.history = []
         st.session_state.prev_all_tie = False
+        st.session_state.first_input_focus = True
