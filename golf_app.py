@@ -88,65 +88,91 @@ for i, p in enumerate(players):
     score_labels.append(sel)
 
 # ----------------------
-# 1:1 + 배판 계산 함수
+# 홀 계산 함수
 # ----------------------
 def calculate_hole(scores, par, prev_all_tie, base_amount, max_per_stroke):
     n = len(scores)
     multipliers = []
     reasons = []
 
+    # 1️⃣ 버디/이글 보너스 계산 → 각자 타수 보정
     for s in scores:
         diff = s - par
         multiplier = 1
         reason = []
         if diff == -1:  # 버디
-            multiplier = 2
-            reason.append("버디 → 한타 추가")
+            multiplier = 1  # 배판과 별도로 한타 보너스는 타수차 계산에서 반영
+            reason.append("버디 → 한타 보너스 적용")
         elif diff <= -2:  # 이글
-            multiplier = 4
-            reason.append("이글 → 두타 추가")
+            multiplier = 1
+            reason.append("이글 → 두타 보너스 적용")
         else:
             reason.append("일반")
         multipliers.append(multiplier)
         reasons.append(", ".join(reason))
 
-    # 배판 판단
+    # 2️⃣ 배판/배배판 적용 → 타당 금액 결정
     counts = Counter(scores)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(scores)) == 1
     any_birdie_eagle = any((s - par) <= -1 for s in scores)
-    batch_multiplier = 2 if tie_three or prev_all_tie or any_birdie_eagle else 1
+
+    batch_multiplier = 1
     batch_reason = []
-    if tie_three: batch_reason.append("3명 이상 동타 → 배판")
-    if prev_all_tie: batch_reason.append("전홀 동타 → 배판")
-    if any_birdie_eagle: batch_reason.append("이번 홀 버디/이글 → 배판")
-    if not batch_reason: batch_reason.append("배판 없음")
+
+    if tie_three:
+        batch_multiplier *= 2
+        batch_reason.append("3명 이상 동타 → 배판 적용")
+    if prev_all_tie:
+        batch_multiplier *= 2
+        batch_reason.append("전홀 동타 → 배판 적용")
+    if any_birdie_eagle:
+        batch_multiplier *= 2
+        batch_reason.append("버디/이글 발생 → 배판 적용")
+    if not batch_reason:
+        batch_reason.append("배판 없음")
+
     batch_reason_str = "\n".join(batch_reason)
 
+    # 3️⃣ 모든 스코어 동일 → 금액 없음
     if all_tie:
         money_matrix = [[0]*n for _ in range(n)]
         total_per_player = [0]*n
-        return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
+        return total_per_player, money_matrix, all_tie, reasons, batch_reason_str, batch_multiplier
 
-    # 금액 매트릭스 계산 (타당 최대금액 적용 여부)
+    # 4️⃣ 1:1 금액 계산
     money_matrix = [[0]*n for _ in range(n)]
     for i,j in combinations(range(n),2):
-        diff = scores[j] - scores[i]  # 실제 타수 차이
-        per_stroke_amount = base_amount * max(multipliers[i], multipliers[j])
-        if max_per_stroke:  # 토글 ON이면 최대금액 적용
+        # 타수 차 + 버디/이글 보너스
+        diff = (scores[j] - scores[i])
+        # A 버디이면 1타 추가, 이글이면 2타 추가
+        if score_labels[i] == "버디":
+            diff -= 1
+        elif score_labels[i] == "이글":
+            diff -= 2
+        if score_labels[j] == "버디":
+            diff += 1
+        elif score_labels[j] == "이글":
+            diff += 2
+
+        # 최종 타당 금액
+        per_stroke_amount = base_amount * batch_multiplier
+        if max_per_stroke:  # 최대 금액 적용 토글
             per_stroke_amount = min(per_stroke_amount, max_per_stroke)
-        amt = diff * per_stroke_amount * batch_multiplier
+
+        amt = diff * per_stroke_amount
         money_matrix[i][j] = -amt
         money_matrix[j][i] = amt
 
     total_per_player = [sum(row) for row in money_matrix]
-    return total_per_player, money_matrix, all_tie, reasons, batch_reason_str
+
+    return total_per_player, money_matrix, all_tie, reasons, batch_reason_str, batch_multiplier
 
 # ----------------------
 # 이번 홀 계산
 # ----------------------
 if st.button("이번 홀 계산"):
-    totals, matrix, all_tie, reasons, batch_reason_str = calculate_hole(
+    totals, matrix, all_tie, reasons, batch_reason_str, batch_multiplier = calculate_hole(
         scores, par, st.session_state.prev_all_tie,
         st.session_state.base_amount, st.session_state.max_per_stroke
     )
@@ -159,24 +185,28 @@ if st.button("이번 홀 계산"):
         "scores": scores,
         "score_labels": score_labels,
         "matrix": matrix,
-        "totals": totals
+        "totals": totals,
+        "batch_multiplier": batch_multiplier
     })
 
     st.session_state.prev_all_tie = all_tie
 
     # ----------------------
-    # 1️⃣ 처리 과정 표시
+    # 처리 과정 표시
     # ----------------------
     st.subheader(f"📝 홀 {st.session_state.hole} 처리 과정")
     st.markdown("**1️⃣ 타수 차 계산**")
     for i, s in enumerate(scores):
         diff = s - par
-        st.write(f"{players[i]}: 스코어 {score_labels[i]} → 타수 차 {diff:+}")
+        st.write(f"{players[i]}: 스코어 {score_labels[i]} → 기본 타수 차 {diff:+}")
+
     st.markdown("**2️⃣ 버디/이글 보너스 적용**")
     for i, r in enumerate(reasons):
         st.write(f"{players[i]}: {r}")
+
     st.markdown("**3️⃣ 배판/배배판 적용**")
     st.write(batch_reason_str)
+    st.write(f"▶ 적용 배수: {batch_multiplier}배")
 
     # ----------------------
     # 이번 홀 최종 금액 정리
