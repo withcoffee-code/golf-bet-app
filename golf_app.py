@@ -94,70 +94,56 @@ def to_data_url(img: Image.Image) -> str:
 def get_ocr_reader():
     if not EASYOCR_AVAILABLE:
         return None
-    # 숫자 위주라 en만으로 충분한 경우가 많음(속도/안정)
     return easyocr.Reader(["en"], gpu=False)
 
 
 def _prep_crop_for_ocr(crop: Image.Image) -> np.ndarray:
-    """
-    숫자 OCR용 전처리: 확대 + 그레이 + 대비 + 약한 이진화
-    """
     crop = crop.convert("L")
-    # 확대(너무 과하면 깨짐)
     w, h = crop.size
     crop = crop.resize((max(40, int(w * 3)), max(40, int(h * 3))), Image.Resampling.LANCZOS)
-
     crop = ImageOps.autocontrast(crop)
     crop = ImageEnhance.Contrast(crop).enhance(1.7)
     crop = ImageEnhance.Sharpness(crop).enhance(1.2)
-
-    # 약한 이진화(배경이 밝은 스코어카드 가정)
     crop = crop.point(lambda p: 255 if p > 185 else 0)
-
     return np.array(crop)
 
 
-def ocr_read_int(crop: Image.Image) -> int:
+def ocr_read_int_or_x(crop: Image.Image):
     """
-    OCR로 숫자만 읽어서 정수 반환. 못 읽으면 -1.
+    OCR로 숫자 읽기.
+    - 성공: int(0~20)
+    - 실패: "x"
     """
     reader = get_ocr_reader()
     if reader is None:
-        return -1
+        return "x"
 
     img_np = _prep_crop_for_ocr(crop)
-
-    # allowlist로 숫자만
     results = reader.readtext(img_np, detail=1, allowlist="0123456789")
     if not results:
-        return -1
+        return "x"
 
-    # 결과 중 가장 그럴듯한 숫자 선택
-    # results: [(bbox, text, conf), ...]
     best = None
     best_score = -1.0
     for _, text, conf in results:
         text = re.sub(r"[^0-9]", "", text or "")
         if not text:
             continue
-        # 1~2자리 우선(타수는 보통 3~9 / 최대 20)
         score = conf
-        if len(text) == 1 or len(text) == 2:
+        if len(text) in (1, 2):
             score += 0.15
         if score > best_score:
             best_score = score
             best = text
 
     if not best:
-        return -1
+        return "x"
 
     try:
         v = int(best)
-        if 0 <= v <= 20:
-            return v
-        return -1
+        return v if 0 <= v <= 20 else "x"
     except Exception:
-        return -1
+        return "x"
 
 
 # ======================
@@ -169,31 +155,15 @@ STRUCT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "players": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-            "out_pars": {
-                "type": "array",
-                "items": {"type": "integer", "enum": [3, 4, 5]},
-                "minItems": 9,
-                "maxItems": 9,
-            },
-            "in_pars": {
-                "type": "array",
-                "items": {"type": "integer", "enum": [3, 4, 5]},
-                "minItems": 9,
-                "maxItems": 9,
-            },
+            "players": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+            "out_pars": {"type": "array", "items": {"type": "integer", "enum": [3, 4, 5]}, "minItems": 9, "maxItems": 9},
+            "in_pars": {"type": "array", "items": {"type": "integer", "enum": [3, 4, 5]}, "minItems": 9, "maxItems": 9},
         },
         "required": ["players", "out_pars", "in_pars"],
     },
     "strict": True,
 }
 
-# 🔥 핵심 추가: "각 타수 칸의 바운딩 박스"를 AI가 뽑아주게 함 (정규화 좌표 0~1)
 CELLBOX_SCHEMA = {
     "name": "scorecard_cellboxes",
     "schema": {
@@ -355,7 +325,6 @@ def norm_box_to_pixels(box, w, h, pad=2):
     x1 = int(max(0, min(1, box["x1"])) * w)
     y1 = int(max(0, min(1, box["y1"])) * h)
 
-    # 최소 크기 보장 + 패딩
     x0 = max(0, x0 - pad)
     y0 = max(0, y0 - pad)
     x1 = min(w, x1 + pad)
@@ -369,7 +338,7 @@ def norm_box_to_pixels(box, w, h, pad=2):
 def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
     """
     boxes_4x9: 4x9 normalized boxes
-    return: 4x9 int strokes
+    return: 4x9 values (int or "x")
     """
     w, h = img.size
     strokes = []
@@ -379,83 +348,75 @@ def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
             b = boxes_4x9[pi][hi]
             px = norm_box_to_pixels(b, w, h, pad=3)
             if px is None:
-                row.append(-1)
+                row.append("x")
                 continue
             crop = img.crop(px)
-            v = ocr_read_int(crop)
+            v = ocr_read_int_or_x(crop)
             row.append(v)
         strokes.append(row)
     return strokes
 
 
 # ======================
-# DF + checks (기존 유지)
+# DF + checks
 # ======================
 def to_df18(players, out_pars, in_pars, out_strokes, in_strokes):
     rows = []
     for idx in range(9):
         row = {"Hole": idx + 1, "Par": int(out_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = int(out_strokes[p_i][idx])
+            row[name] = out_strokes[p_i][idx]
         rows.append(row)
     for idx in range(9):
         row = {"Hole": idx + 10, "Par": int(in_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = int(in_strokes[p_i][idx])
+            row[name] = in_strokes[p_i][idx]
         rows.append(row)
     return pd.DataFrame(rows).sort_values("Hole").reset_index(drop=True)
 
 
 def has_unknowns_df(df: pd.DataFrame, players) -> bool:
-    return (df[players] < 0).any().any()
+    return (df[players].astype(str) == "x").any().any()
 
 
 def totals_check(df: pd.DataFrame, players, totals: dict):
+    # x가 섞이면 합계 검증은 보수적으로(계산 불가) 표시
+    def safe_sum(series):
+        if (series.astype(str) == "x").any():
+            return None
+        return int(pd.to_numeric(series).sum())
+
     out_total = totals.get("out_total", [-1]*4)
     in_total = totals.get("in_total", [-1]*4)
     grand_total = totals.get("grand_total", [-1]*4)
 
-    out_sum = [int(df.loc[df["Hole"].between(1, 9), p].sum()) for p in players]
-    in_sum = [int(df.loc[df["Hole"].between(10, 18), p].sum()) for p in players]
-    grand_sum = [out_sum[i] + in_sum[i] for i in range(4)]
-
-    def candidate_holes(seg_df: pd.DataFrame, player: str, diff: int):
-        cand = []
-        for _, r in seg_df.iterrows():
-            v = int(r[player])
-            newv = v - diff
-            if 1 <= newv <= 20:
-                cand.append(int(r["Hole"]))
-        return cand[:6]
+    out_sum = [safe_sum(df.loc[df["Hole"].between(1, 9), p]) for p in players]
+    in_sum = [safe_sum(df.loc[df["Hole"].between(10, 18), p]) for p in players]
+    grand_sum = [
+        (out_sum[i] + in_sum[i]) if out_sum[i] is not None and in_sum[i] is not None else None
+        for i in range(4)
+    ]
 
     rows, hints = [], []
+
     for i, p in enumerate(players):
         o_t = int(out_total[i])
         i_t = int(in_total[i])
         g_t = int(grand_total[i])
 
-        o_ok = (o_t == -1) or (o_t == out_sum[i])
-        i_ok = (i_t == -1) or (i_t == in_sum[i])
-        g_ok = (g_t == -1) or (g_t == grand_sum[i])
+        o_ok = (o_t == -1) or (out_sum[i] is not None and o_t == out_sum[i])
+        i_ok = (i_t == -1) or (in_sum[i] is not None and i_t == in_sum[i])
+        g_ok = (g_t == -1) or (grand_sum[i] is not None and g_t == grand_sum[i])
 
         rows.append([
             p,
-            out_sum[i], ("" if o_t == -1 else o_t), "OK" if o_ok else "DIFF",
-            in_sum[i], ("" if i_t == -1 else i_t), "OK" if i_ok else "DIFF",
-            grand_sum[i], ("" if g_t == -1 else g_t), "OK" if g_ok else "DIFF",
+            ("" if out_sum[i] is None else out_sum[i]), ("" if o_t == -1 else o_t), ("SKIP" if out_sum[i] is None else ("OK" if o_ok else "DIFF")),
+            ("" if in_sum[i] is None else in_sum[i]), ("" if i_t == -1 else i_t), ("SKIP" if in_sum[i] is None else ("OK" if i_ok else "DIFF")),
+            ("" if grand_sum[i] is None else grand_sum[i]), ("" if g_t == -1 else g_t), ("SKIP" if grand_sum[i] is None else ("OK" if g_ok else "DIFF")),
         ])
 
-        if o_t != -1 and o_t != out_sum[i]:
-            diff = out_sum[i] - o_t
-            cand = candidate_holes(df[df["Hole"].between(1, 9)], p, diff)
-            hints.append(f"{p} OUT 불일치: (현재 {out_sum[i]})-(카드 {o_t})={diff:+}. 후보 홀: {cand if cand else '없음'}")
-        if i_t != -1 and i_t != in_sum[i]:
-            diff = in_sum[i] - i_t
-            cand = candidate_holes(df[df["Hole"].between(10, 18)], p, diff)
-            hints.append(f"{p} IN 불일치: (현재 {in_sum[i]})-(카드 {i_t})={diff:+}. 후보 홀: {cand if cand else '없음'}")
-        if g_t != -1 and g_t != grand_sum[i]:
-            diff = grand_sum[i] - g_t
-            hints.append(f"{p} TOTAL 불일치: (현재 {grand_sum[i]})-(카드 {g_t})={diff:+}. OUT/IN부터 확인 추천")
+        if out_sum[i] is None or in_sum[i] is None:
+            hints.append(f"{p}: 'x'가 있어 합계 검증 일부를 SKIP했습니다. x를 숫자로 수정 후 다시 확인하세요.")
 
     df_check = pd.DataFrame(rows, columns=[
         "플레이어",
@@ -571,7 +532,7 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 구조(이름/PAR/칸 위치) + OCR로 타수 읽기")
+    st.subheader("1) AI로 구조 + OCR로 타수 (실패는 x로 표시)")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
@@ -595,16 +556,15 @@ with colA:
             with st.spinner("타수 칸 위치(바운딩박스) 추출(AI) 중..."):
                 boxes = extract_cell_boxes(img_light, players, out_pars, in_pars)
 
-            # OCR로 타수 읽기
             with st.spinner("타수 OCR 중..."):
                 out_strokes = read_strokes_with_ocr(img_base, boxes["out_boxes"])
                 in_strokes = read_strokes_with_ocr(img_base, boxes["in_boxes"])
 
             df = to_df18(players, out_pars, in_pars, out_strokes, in_strokes)
 
-            # -1이 많으면 강전처리 이미지로 OCR 1회 재시도 (AI 박스는 그대로 사용)
-            if (df[players] < 0).sum().sum() > 0:
-                st.warning("⚠️ 일부 칸 OCR 실패(-1). 강전처리로 OCR 재시도합니다.")
+            # x가 있으면 강전처리로 OCR 1회 재시도 (박스는 그대로)
+            if (df[players].astype(str) == "x").sum().sum() > 0:
+                st.warning("⚠️ 일부 칸 OCR 실패(x). 강전처리로 OCR 재시도합니다.")
                 img_strong = preprocess_strong(img_base)
                 st.image(img_strong, caption="전처리(강화/OCR 재시도)", use_container_width=True)
 
@@ -612,9 +572,9 @@ with colA:
                 in2 = read_strokes_with_ocr(img_strong, boxes["in_boxes"])
                 df2 = to_df18(players, out_pars, in_pars, out2, in2)
 
-                if (df2[players] < 0).sum().sum() < (df[players] < 0).sum().sum():
+                if (df2[players].astype(str) == "x").sum().sum() < (df[players].astype(str) == "x").sum().sum():
                     df = df2
-                    st.success("✅ 강전처리 OCR 재시도로 -1이 줄어들어 2차 결과를 적용했습니다.")
+                    st.success("✅ 강전처리 OCR 재시도로 x가 줄어들어 2차 결과를 적용했습니다.")
                 else:
                     st.info("ℹ️ 강전처리 OCR이 더 좋지 않아 1차 결과를 유지합니다.")
 
@@ -622,7 +582,7 @@ with colA:
             st.session_state.df = df
             st.success("✅ 추출 완료! 오른쪽에서 확인/수정 후 정산하세요.")
 
-            # 합계 검증(기존 유지)
+            # 합계 검증(기존 유지, x면 SKIP)
             st.session_state.totals_check_df = None
             st.session_state.totals_hints = None
             if use_totals_check_toggle:
@@ -646,13 +606,13 @@ with colB:
         players = st.session_state.players
 
         if has_unknowns_df(st.session_state.df, players):
-            st.warning("⚠️ -1(미확정) 값이 남아있습니다. 수정 후 정산하세요.")
+            st.warning("⚠️ x(미확정) 값이 남아있습니다. 수정 후 정산하세요.")
 
         if st.session_state.totals_check_df is not None:
             st.markdown("### ✅ OUT/IN 합계 검증")
             st.dataframe(st.session_state.totals_check_df, use_container_width=True)
             if st.session_state.totals_hints:
-                with st.expander("🔎 틀린 홀 후보(자동 제안)"):
+                with st.expander("🔎 안내/후보"):
                     for h in st.session_state.totals_hints:
                         st.write("- " + h)
 
@@ -662,10 +622,15 @@ with colB:
         if st.button("💰 18홀 정산 (홀별 내역 포함)"):
             dfv = st.session_state.df.copy()
 
+            # x가 있으면 정산 불가
             for p in players:
-                if (dfv[p] < 0).any():
-                    st.error("❌ -1 값이 남아있어 정산할 수 없습니다. -1을 모두 수정해주세요.")
+                if (dfv[p].astype(str) == "x").any():
+                    st.error("❌ x 값이 남아있어 정산할 수 없습니다. x를 숫자로 수정해주세요.")
                     st.stop()
+
+            # 숫자형 변환
+            for p in players:
+                dfv[p] = pd.to_numeric(dfv[p])
 
             prev_all_tie = False
             total = [0, 0, 0, 0]
