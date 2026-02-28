@@ -26,7 +26,7 @@ except Exception:
 # Page
 # ======================
 st.set_page_config(page_title="Kevin 룰 계산기", layout="wide")
-st.title("⛳ Kevin 룰 계산기 (OCR 엔진 도입: 타수는 OCR / 구조는 AI)")
+st.title("⛳ Kevin 룰 계산기 (OCR: 전체 검출→정렬 / 구조는 AI, 실패는 x)")
 
 MAX_WIDTH = 1800
 
@@ -97,62 +97,141 @@ def get_ocr_reader():
     return easyocr.Reader(["en"], gpu=False)
 
 
-def _prep_crop_for_ocr(crop: Image.Image) -> np.ndarray:
+def ocr_detect_numbers(img: Image.Image):
     """
-    숫자 OCR용 전처리: 확대 + 그레이 + 대비 + 약한 이진화
-    """
-    crop = crop.convert("L")
-    w, h = crop.size
-    crop = crop.resize((max(40, int(w * 3)), max(40, int(h * 3))), Image.Resampling.LANCZOS)
-    crop = ImageOps.autocontrast(crop)
-    crop = ImageEnhance.Contrast(crop).enhance(1.7)
-    crop = ImageEnhance.Sharpness(crop).enhance(1.2)
-    crop = crop.point(lambda p: 255 if p > 185 else 0)
-    return np.array(crop)
-
-
-def ocr_read_raw_or_x(crop: Image.Image) -> str:
-    """
-    ✅ 요청 반영:
-    - OCR이 읽은 텍스트를 "그대로" 출력/저장하기 위해
-      int 변환/범위검증(0~20) 등을 하지 않고,
-      OCR 결과에서 숫자 문자열만 뽑아 그대로 반환.
-    - 못 읽으면 "x"
+    이미지 전체에서 숫자 토큰(좌표+문자+신뢰도) 검출
+    return: list of dict {cx, cy, text, conf}
     """
     reader = get_ocr_reader()
     if reader is None:
-        return "x"
+        return []
 
-    img_np = _prep_crop_for_ocr(crop)
+    base = img.convert("L")
+    base = ImageOps.autocontrast(base)
+    base = ImageEnhance.Contrast(base).enhance(1.4)
+    img_np = np.array(base)
 
-    # allowlist=숫자만: 그래도 OCR이 이상한 문자를 섞을 수 있어 정규식으로 한번 더 정리
     results = reader.readtext(img_np, detail=1, allowlist="0123456789")
-    if not results:
-        return "x"
-
-    best_text = ""
-    best_score = -1.0
-
-    for _, text, conf in results:
-        # 숫자만 남김 (예: "O8" -> "8" 같은 케이스 방지)
+    tokens = []
+    for bbox, text, conf in results:
         t = re.sub(r"[^0-9]", "", text or "")
         if not t:
             continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        cx = float(sum(xs) / 4.0)
+        cy = float(sum(ys) / 4.0)
+        tokens.append({"cx": cx, "cy": cy, "text": t, "conf": float(conf)})
+    return tokens
 
-        # 신뢰도 + (1~2자리 선호) 가중치
-        score = float(conf)
-        if len(t) in (1, 2):
-            score += 0.15
 
-        if score > best_score:
-            best_score = score
-            best_text = t
+def _kmeans_1d(points, k, iters=25):
+    """
+    간단 1D k-means (외부 라이브러리 없이)
+    points: list[float]
+    return: centers(list), labels(list[int])
+    """
+    if len(points) < k:
+        return None, None
 
-    return best_text if best_text else "x"
+    pts = np.array(points, dtype=float)
+    qs = np.linspace(0.1, 0.9, k)
+    centers = np.quantile(pts, qs)
+
+    for _ in range(iters):
+        d = np.abs(pts.reshape(-1, 1) - centers.reshape(1, -1))
+        labels = d.argmin(axis=1)
+        new_centers = []
+        for i in range(k):
+            group = pts[labels == i]
+            new_centers.append(group.mean() if len(group) else centers[i])
+        new_centers = np.array(new_centers)
+        if np.allclose(new_centers, centers):
+            break
+        centers = new_centers
+
+    order = np.argsort(centers)
+    centers_sorted = centers[order]
+    remap = {int(order[i]): i for i in range(k)}
+    labels_mapped = [remap[int(l)] for l in labels]
+    return centers_sorted.tolist(), labels_mapped
+
+
+def build_4x9_from_tokens(tokens, expected_rows=4, expected_cols=9):
+    """
+    tokens -> (행=플레이어4, 열=9홀) 정렬. 값은 OCR 원문 숫자 문자열 그대로, 실패는 "x"
+    """
+    if not tokens:
+        return [["x"] * expected_cols for _ in range(expected_rows)]
+
+    xs = [t["cx"] for t in tokens]
+    ys = [t["cy"] for t in tokens]
+
+    x_centers, x_labels = _kmeans_1d(xs, expected_cols)
+    if x_centers is None:
+        return [["x"] * expected_cols for _ in range(expected_rows)]
+
+    # PAR/합계/핸디 등 추가 행이 섞이므로 y는 더 크게 클러스터링 후 "토큰 많은 4개"를 선택
+    row_k = 7
+    if len(tokens) < row_k:
+        row_k = max(4, min(6, len(tokens)))
+    y_centers, y_labels = _kmeans_1d(ys, row_k)
+    if y_centers is None:
+        return [["x"] * expected_cols for _ in range(expected_rows)]
+
+    counts = [0] * row_k
+    for lab in y_labels:
+        counts[lab] += 1
+
+    top_rows = sorted(range(row_k), key=lambda i: counts[i], reverse=True)[:expected_rows]
+    top_rows = sorted(top_rows)  # 위->아래
+
+    row_map = {orig: new_i for new_i, orig in enumerate(top_rows)}
+    grid = [["x"] * expected_cols for _ in range(expected_rows)]
+    buckets = {(ri, ci): [] for ri in range(expected_rows) for ci in range(expected_cols)}
+
+    for t, xl, yl in zip(tokens, x_labels, y_labels):
+        if yl not in row_map:
+            continue
+        ri = row_map[yl]
+        ci = xl
+        buckets[(ri, ci)].append(t)
+
+    for ri in range(expected_rows):
+        for ci in range(expected_cols):
+            cand = buckets[(ri, ci)]
+            if not cand:
+                continue
+            best = None
+            best_score = -1
+            for t in cand:
+                score = t["conf"]
+                if len(t["text"]) in (1, 2):
+                    score += 0.1
+                if score > best_score:
+                    best_score = score
+                    best = t
+            grid[ri][ci] = best["text"] if best else "x"
+
+    return grid
+
+
+def split_out_in_tokens(tokens):
+    """
+    OUT/IN을 좌/우로 분리 (대부분 스코어카드가 좌 9홀 / 우 9홀 구조)
+    x_mid = 전체 숫자 토큰의 median x
+    """
+    if not tokens:
+        return [], []
+    xs = [t["cx"] for t in tokens]
+    x_mid = float(np.median(xs))
+    out_tokens = [t for t in tokens if t["cx"] <= x_mid]
+    in_tokens = [t for t in tokens if t["cx"] > x_mid]
+    return out_tokens, in_tokens
 
 
 # ======================
-# JSON Schemas (strict)
+# JSON Schemas (strict) - 구조는 AI
 # ======================
 STRUCT_SCHEMA = {
     "name": "scorecard_structure",
@@ -165,60 +244,6 @@ STRUCT_SCHEMA = {
             "in_pars": {"type": "array", "items": {"type": "integer", "enum": [3, 4, 5]}, "minItems": 9, "maxItems": 9},
         },
         "required": ["players", "out_pars", "in_pars"],
-    },
-    "strict": True,
-}
-
-CELLBOX_SCHEMA = {
-    "name": "scorecard_cellboxes",
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "out_boxes": {
-                "type": "array",
-                "minItems": 4,
-                "maxItems": 4,
-                "items": {
-                    "type": "array",
-                    "minItems": 9,
-                    "maxItems": 9,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "x0": {"type": "number", "minimum": 0, "maximum": 1},
-                            "y0": {"type": "number", "minimum": 0, "maximum": 1},
-                            "x1": {"type": "number", "minimum": 0, "maximum": 1},
-                            "y1": {"type": "number", "minimum": 0, "maximum": 1},
-                        },
-                        "required": ["x0", "y0", "x1", "y1"],
-                    },
-                },
-            },
-            "in_boxes": {
-                "type": "array",
-                "minItems": 4,
-                "maxItems": 4,
-                "items": {
-                    "type": "array",
-                    "minItems": 9,
-                    "maxItems": 9,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "x0": {"type": "number", "minimum": 0, "maximum": 1},
-                            "y0": {"type": "number", "minimum": 0, "maximum": 1},
-                            "x1": {"type": "number", "minimum": 0, "maximum": 1},
-                            "y1": {"type": "number", "minimum": 0, "maximum": 1},
-                        },
-                        "required": ["x0", "y0", "x1", "y1"],
-                    },
-                },
-            },
-        },
-        "required": ["out_boxes", "in_boxes"],
     },
     "strict": True,
 }
@@ -261,7 +286,7 @@ def call_json_schema(content, schema_pack, model_primary="gpt-4.1", model_fallba
 
 
 # ======================
-# Extraction (구조는 AI, 타수 칸 위치는 AI, 타수는 OCR)
+# Extraction (구조는 AI, 타수는 OCR 전체검출→정렬)
 # ======================
 def extract_structure(img: Image.Image):
     prompt = """
@@ -281,33 +306,6 @@ def extract_structure(img: Image.Image):
     return call_json_schema(content, STRUCT_SCHEMA)
 
 
-def extract_cell_boxes(img: Image.Image, players, out_pars, in_pars):
-    prompt = f"""
-이 이미지는 골프 스코어카드이다. (한 장에 OUT/IN 모두 포함)
-
-아래 정보는 이미 확정되었다. 절대 바꾸지 마라:
-players(순서 고정): {players}
-out_pars(1~9): {out_pars}
-in_pars(10~18): {in_pars}
-
-너의 임무는 "타수 숫자가 적힌 칸"의 바운딩박스를 반환하는 것이다.
-
-반드시 반환:
-- out_boxes: 4x9 (players 순서대로, OUT 1~9홀 순서). 각 원소는 박스(x0,y0,x1,y1)
-- in_boxes: 4x9 (players 순서대로, IN 10~18홀 순서). 각 원소는 박스(x0,y0,x1,y1)
-
-좌표 규칙:
-- x0,y0,x1,y1 는 이미지 전체 대비 정규화 좌표(0~1)
-- x0 < x1, y0 < y1
-- 숫자 텍스트가 들어있는 "칸 내부"가 되게 (너무 타이트하지 말고 약간 여유 있게)
-- 아이콘/동그라미/색칠은 무시, 숫자 칸 기준
-
-JSON 외 출력 금지.
-"""
-    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img)}]
-    return call_json_schema(content, CELLBOX_SCHEMA)
-
-
 def extract_totals(img: Image.Image, players):
     prompt = f"""
 이 이미지는 골프 스코어카드이다.
@@ -324,43 +322,6 @@ players: {players}
     return call_json_schema(content, TOTALS_SCHEMA)
 
 
-def norm_box_to_pixels(box, w, h, pad=3):
-    x0 = int(max(0, min(1, box["x0"])) * w)
-    y0 = int(max(0, min(1, box["y0"])) * h)
-    x1 = int(max(0, min(1, box["x1"])) * w)
-    y1 = int(max(0, min(1, box["y1"])) * h)
-
-    x0 = max(0, x0 - pad)
-    y0 = max(0, y0 - pad)
-    x1 = min(w, x1 + pad)
-    y1 = min(h, y1 + pad)
-
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return (x0, y0, x1, y1)
-
-
-def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
-    """
-    ✅ OCR이 읽은 값을 그대로 문자열로 저장 (못 읽으면 "x")
-    """
-    w, h = img.size
-    strokes = []
-    for pi in range(4):
-        row = []
-        for hi in range(9):
-            b = boxes_4x9[pi][hi]
-            px = norm_box_to_pixels(b, w, h, pad=3)
-            if px is None:
-                row.append("x")
-                continue
-            crop = img.crop(px)
-            raw = ocr_read_raw_or_x(crop)
-            row.append(raw)
-        strokes.append(row)
-    return strokes
-
-
 # ======================
 # DF + checks
 # ======================
@@ -369,12 +330,12 @@ def to_df18(players, out_pars, in_pars, out_strokes, in_strokes):
     for idx in range(9):
         row = {"Hole": idx + 1, "Par": int(out_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = out_strokes[p_i][idx]  # ✅ raw string
+            row[name] = out_strokes[p_i][idx]  # raw string
         rows.append(row)
     for idx in range(9):
         row = {"Hole": idx + 10, "Par": int(in_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = in_strokes[p_i][idx]   # ✅ raw string
+            row[name] = in_strokes[p_i][idx]   # raw string
         rows.append(row)
     return pd.DataFrame(rows).sort_values("Hole").reset_index(drop=True)
 
@@ -384,12 +345,12 @@ def has_unknowns_df(df: pd.DataFrame, players) -> bool:
 
 
 def totals_check(df: pd.DataFrame, players, totals: dict):
-    # x가 섞이면 합계 검증은 보수적으로(계산 불가) 표시
     def safe_sum(series):
         s = series.astype(str)
         if (s == "x").any():
             return None
-        # ✅ raw string이므로 numeric 변환
+        if (~s.str.fullmatch(r"\d+")).any():
+            return None
         try:
             return int(pd.to_numeric(s).sum())
         except Exception:
@@ -423,7 +384,7 @@ def totals_check(df: pd.DataFrame, players, totals: dict):
             ("" if grand_sum[i] is None else grand_sum[i]), ("" if g_t == -1 else g_t), ("SKIP" if grand_sum[i] is None else ("OK" if g_ok else "DIFF")),
         ])
 
-        if out_sum[i] is None or in_sum[i] is None:
+        if out_sum[i] is None or in_sum[i] is None or grand_sum[i] is None:
             hints.append(f"{p}: 'x' 또는 비정상 값이 있어 합계 검증 일부를 SKIP했습니다. 값을 숫자로 수정 후 다시 확인하세요.")
 
     df_check = pd.DataFrame(rows, columns=[
@@ -540,7 +501,7 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 구조/칸 위치 + OCR 원문 그대로 저장(못 읽으면 x)")
+    st.subheader("1) AI로 구조(이름/Par) + OCR 전체검출→정렬 (실패는 x)")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
@@ -549,7 +510,7 @@ with colA:
         img_light = preprocess_light(img_base)
         st.image(img_light, caption="전처리(기본)", use_container_width=True)
 
-        if st.button("🤖 읽기 실행 (AI+OCR)"):
+        if st.button("🤖 읽기 실행 (AI + OCR정렬)"):
             if not EASYOCR_AVAILABLE:
                 st.error("EasyOCR이 설치되지 않아 진행할 수 없습니다. requirements.txt를 업데이트하세요.")
                 st.stop()
@@ -561,30 +522,35 @@ with colA:
             out_pars = struct["out_pars"]
             in_pars = struct["in_pars"]
 
-            with st.spinner("타수 칸 위치(바운딩박스) 추출(AI) 중..."):
-                boxes = extract_cell_boxes(img_light, players, out_pars, in_pars)
+            with st.spinner("숫자 토큰 전체 OCR 검출 중..."):
+                tokens = ocr_detect_numbers(img_base)
 
-            with st.spinner("타수 OCR 중..."):
-                out_strokes = read_strokes_with_ocr(img_base, boxes["out_boxes"])
-                in_strokes = read_strokes_with_ocr(img_base, boxes["in_boxes"])
+            with st.spinner("OUT/IN 분리 및 4x9 정렬 중..."):
+                out_tokens, in_tokens = split_out_in_tokens(tokens)
+                out_strokes = build_4x9_from_tokens(out_tokens, 4, 9)
+                in_strokes = build_4x9_from_tokens(in_tokens, 4, 9)
 
             df = to_df18(players, out_pars, in_pars, out_strokes, in_strokes)
 
-            # x가 있으면 강전처리로 OCR 1회 재시도 (박스는 그대로)
-            if (df[players].astype(str) == "x").sum().sum() > 0:
-                st.warning("⚠️ 일부 칸 OCR 실패(x). 강전처리로 OCR 재시도합니다.")
+            # x가 많으면 강전처리로 OCR 재시도 (정렬 로직 동일)
+            x_count = int((df[players].astype(str) == "x").sum().sum())
+            if x_count > 0:
+                st.warning(f"⚠️ OCR 정렬 결과 x={x_count}개. 강전처리로 OCR을 한 번 더 시도합니다.")
                 img_strong = preprocess_strong(img_base)
                 st.image(img_strong, caption="전처리(강화/OCR 재시도)", use_container_width=True)
 
-                out2 = read_strokes_with_ocr(img_strong, boxes["out_boxes"])
-                in2 = read_strokes_with_ocr(img_strong, boxes["in_boxes"])
-                df2 = to_df18(players, out_pars, in_pars, out2, in2)
+                tokens2 = ocr_detect_numbers(img_strong)
+                out2, in2 = split_out_in_tokens(tokens2)
+                df2 = to_df18(players, out_pars, in_pars,
+                              build_4x9_from_tokens(out2, 4, 9),
+                              build_4x9_from_tokens(in2, 4, 9))
 
-                if (df2[players].astype(str) == "x").sum().sum() < (df[players].astype(str) == "x").sum().sum():
+                x2 = int((df2[players].astype(str) == "x").sum().sum())
+                if x2 < x_count:
                     df = df2
-                    st.success("✅ 강전처리 OCR 재시도로 x가 줄어들어 2차 결과를 적용했습니다.")
+                    st.success(f"✅ 재시도로 x가 {x_count}→{x2}로 감소하여 2차 결과를 적용했습니다.")
                 else:
-                    st.info("ℹ️ 강전처리 OCR이 더 좋지 않아 1차 결과를 유지합니다.")
+                    st.info("ℹ️ 재시도 결과가 더 좋아지지 않아 1차 결과를 유지합니다.")
 
             st.session_state.players = players
             st.session_state.df = df
@@ -600,7 +566,7 @@ with colA:
                 st.session_state.totals_check_df = check_df
                 st.session_state.totals_hints = hints
                 if any_diff:
-                    st.warning("⚠️ 카드 합계와 현재 입력 합계가 다릅니다. 오른쪽 후보 홀을 먼저 확인해보세요.")
+                    st.warning("⚠️ 카드 합계와 현재 입력 합계가 다릅니다. 오른쪽에서 확인/수정해주세요.")
                 else:
                     st.success("✅ 합계 검증 OK (또는 카드 합계가 없어 검증 생략됨).")
 
@@ -620,7 +586,7 @@ with colB:
             st.markdown("### ✅ OUT/IN 합계 검증")
             st.dataframe(st.session_state.totals_check_df, use_container_width=True)
             if st.session_state.totals_hints:
-                with st.expander("🔎 안내/후보"):
+                with st.expander("🔎 안내"):
                     for h in st.session_state.totals_hints:
                         st.write("- " + h)
 
