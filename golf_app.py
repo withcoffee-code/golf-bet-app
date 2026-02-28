@@ -1,5 +1,5 @@
 # app.py
-# Streamlit: 스코어카드(사진/PDF) 업로드 → AI Vision으로 (플레이어 이름 + 18홀 Par/타수) 추출 →
+# Streamlit: 스코어카드(사진/PDF) 업로드 → AI Vision으로 (플레이어 이름 + OUT/IN 9홀씩) 추출 →
 # (필요 시 수정) → Kevin 룰로 18홀 일괄 정산
 #
 # 필요:
@@ -42,7 +42,7 @@ except Exception:
 # 페이지 설정
 # ----------------------
 st.set_page_config(page_title="Kevin 룰 계산기 (스코어카드 AI 일괄정산)", layout="wide")
-st.title("⛳ Kevin 룰 계산기 (스코어카드 AI 일괄정산)")
+st.title("⛳ Kevin 룰 계산기 (스코어카드 AI 일괄정산) — OUT/IN 통합 카드 지원")
 
 
 # ----------------------
@@ -122,6 +122,7 @@ st.sidebar.divider()
 st.sidebar.caption("✅ 정산 부호: + 받음 / - 냄")
 st.sidebar.caption("✅ 배판: (3명 이상 동타 / 전홀 동타 / 버디·이글 발생) 각각 2배씩 곱")
 st.sidebar.caption("✅ 버디/이글 보너스: 1:1에서 버디=-1타, 이글=-2타 유효타수로 반영")
+st.sidebar.caption("✅ OUT/IN이 한 장에 같이 있는 스코어카드에 최적화")
 
 
 # ----------------------
@@ -146,9 +147,9 @@ def pdf_to_images(file_bytes: bytes):
     return images
 
 
-# 원본 형태 유지 (최소 패치)
+# ✅ OUT/IN 분리 스키마 (한 장에 OUT/IN 모두 있을 때 정확도↑)
 SCORECARD_SCHEMA = {
-    "name": "scorecard",
+    "name": "scorecard_out_in",
     "schema": {
         "type": "object",
         "properties": {
@@ -158,28 +159,56 @@ SCORECARD_SCHEMA = {
                 "minItems": 4,
                 "maxItems": 4
             },
-            "holes": {
-                "type": "array",
-                "minItems": 18,
-                "maxItems": 18,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "hole": {"type": "integer", "minimum": 1, "maximum": 18},
-                        "par": {"type": "integer", "enum": [3, 4, 5]},
-                        "strokes": {
+            "out": {
+                "type": "object",
+                "properties": {
+                    "pars": {
+                        "type": "array",
+                        "items": {"type": "integer", "enum": [3, 4, 5]},
+                        "minItems": 9,
+                        "maxItems": 9
+                    },
+                    "strokes": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "items": {
                             "type": "array",
                             "items": {"type": "integer", "minimum": 1, "maximum": 20},
-                            "minItems": 4,
-                            "maxItems": 4
+                            "minItems": 9,
+                            "maxItems": 9
                         }
+                    }
+                },
+                "required": ["pars", "strokes"],
+                "additionalProperties": False
+            },
+            "in": {
+                "type": "object",
+                "properties": {
+                    "pars": {
+                        "type": "array",
+                        "items": {"type": "integer", "enum": [3, 4, 5]},
+                        "minItems": 9,
+                        "maxItems": 9
                     },
-                    "required": ["hole", "par", "strokes"],
-                    "additionalProperties": False
-                }
+                    "strokes": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 1, "maximum": 20},
+                            "minItems": 9,
+                            "maxItems": 9
+                        }
+                    }
+                },
+                "required": ["pars", "strokes"],
+                "additionalProperties": False
             }
         },
-        "required": ["players", "holes"],
+        "required": ["players", "out", "in"],
         "additionalProperties": False
     },
     "strict": True
@@ -190,25 +219,26 @@ def extract_scorecard_from_images(images_pil, model_name: str):
     client = get_openai_client()
 
     content = [{"type": "input_text", "text": """
-너는 골프 스코어카드 비전 추출기다.
+너는 골프 스코어카드 비전 추출기다. 이 이미지는 한 장 안에 OUT(1~9)과 IN(10~18)이 함께 있다.
 
 반드시 아래를 추출해라:
-1) 플레이어 4명의 이름(players): 스코어 표에서 타수가 기록된 순서(표의 자연스러운 열/행 순서)대로 4명.
-2) 1~18홀의 par(3/4/5)
-3) 각 홀의 strokes: players 순서와 정확히 같은 순서로 4명 타수 배열.
+1) players: 4명 이름을 스코어 표의 기록 순서대로.
+2) out.pars: OUT 1~9홀의 PAR 9개
+3) out.strokes: players 순서대로 각 플레이어의 OUT 타수 9개 (총 4개 배열)
+4) in.pars: IN 10~18홀의 PAR 9개
+5) in.strokes: players 순서대로 각 플레이어의 IN 타수 9개 (총 4개 배열)
 
 규칙:
-- players 순서와 strokes 인덱스가 1:1로 대응해야 한다.
-- holes는 hole=1..18로 정확히 18개를 반환해야 한다.
-- 이름은 보이는 그대로 최대한 유지(대소문자/공백/기호 포함).
-- 숫자는 표의 셀을 기준으로 정확히 읽어라. OUT/IN/합계가 보이면 일관성 검증에 참고해라.
-- JSON 스키마 외의 텍스트는 절대 출력하지 마라.
+- OUT과 IN을 절대 섞지 마라.
+- pars는 정확히 9개, strokes도 각 플레이어당 9개여야 한다.
+- players 순서와 strokes 인덱스는 1:1 대응.
+- JSON 스키마 외 텍스트는 절대 출력하지 마라.
 """}]
 
     for img in images_pil:
         content.append({"type": "input_image", "image_url": pil_to_data_url(img)})
 
-    # ✅ 최소 패치: text.format.name/schema/strict 추가 (기존 json_schema 래핑 방식 제거)
+    # ✅ 최소 패치 유지: text.format.name/schema/strict
     resp = client.responses.create(
         model=model_name,
         input=[{"role": "user", "content": content}],
@@ -222,6 +252,31 @@ def extract_scorecard_from_images(images_pil, model_name: str):
         },
     )
     return resp.output_text
+
+
+def out_in_to_df(data: dict) -> pd.DataFrame:
+    players = data["players"]
+    rows = []
+
+    # OUT: 1~9
+    out_pars = data["out"]["pars"]
+    out_strokes = data["out"]["strokes"]  # shape: [4][9]
+    for idx in range(9):
+        row = {"Hole": idx + 1, "Par": int(out_pars[idx])}
+        for p_i, name in enumerate(players):
+            row[name] = int(out_strokes[p_i][idx])
+        rows.append(row)
+
+    # IN: 10~18
+    in_pars = data["in"]["pars"]
+    in_strokes = data["in"]["strokes"]  # shape: [4][9]
+    for idx in range(9):
+        row = {"Hole": idx + 10, "Par": int(in_pars[idx])}
+        for p_i, name in enumerate(players):
+            row[name] = int(in_strokes[p_i][idx])
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values("Hole").reset_index(drop=True)
 
 
 # ----------------------
@@ -340,7 +395,7 @@ with left:
     st.subheader("📷 스코어카드 업로드")
     uploaded = st.file_uploader("사진(PNG/JPG/WEBP) 또는 PDF", type=["png", "jpg", "jpeg", "webp", "pdf"])
 
-    st.caption("팁: 표가 작게 찍혔다면 확대샷(2~3장) 또는 PDF(스캔)로 올리면 정확도가 올라갑니다.")
+    st.caption("팁: OUT/IN이 한 장에 같이 있는 전체 스코어카드가 가장 잘 인식됩니다.")
 
     model_name = st.text_input("Vision 모델", value="gpt-4.1-mini")
 
@@ -386,17 +441,12 @@ with left:
             st.session_state.raw_ai_json = raw
             data = json.loads(raw)
 
+            # players 자동 반영 + OUT/IN -> 18홀 DF 변환
             st.session_state.players = data["players"]
+            df18 = out_in_to_df(data)
 
-            rows = []
-            for h in sorted(data["holes"], key=lambda x: x["hole"]):
-                row = {"Hole": int(h["hole"]), "Par": int(h["par"])}
-                for i, name in enumerate(st.session_state.players):
-                    row[name] = int(h["strokes"][i])
-                rows.append(row)
-
-            st.session_state.extracted_df = pd.DataFrame(rows)
-            st.session_state.edited_df = st.session_state.extracted_df.copy()
+            st.session_state.extracted_df = df18
+            st.session_state.edited_df = df18.copy()
             st.success("AI 추출 완료! 오른쪽에서 이름/타수를 확인·수정한 뒤 정산하세요.")
 
         except Exception as e:
