@@ -1,2 +1,7 @@
 streamlit
 openai
+pandas
+pillow
+easyocr
+opencv-python-headless
+numpy
