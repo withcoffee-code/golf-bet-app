@@ -52,7 +52,7 @@ def get_client():
 
 
 # ======================
-# Image utils (크롭/2분할 없음 유지)
+# Image utils
 # ======================
 def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
     img = img.convert("RGB")
@@ -98,6 +98,9 @@ def get_ocr_reader():
 
 
 def _prep_crop_for_ocr(crop: Image.Image) -> np.ndarray:
+    """
+    숫자 OCR용 전처리: 확대 + 그레이 + 대비 + 약한 이진화
+    """
     crop = crop.convert("L")
     w, h = crop.size
     crop = crop.resize((max(40, int(w * 3)), max(40, int(h * 3))), Image.Resampling.LANCZOS)
@@ -108,42 +111,44 @@ def _prep_crop_for_ocr(crop: Image.Image) -> np.ndarray:
     return np.array(crop)
 
 
-def ocr_read_int_or_x(crop: Image.Image):
+def ocr_read_raw_or_x(crop: Image.Image) -> str:
     """
-    OCR로 숫자 읽기.
-    - 성공: int(0~20)
-    - 실패: "x"
+    ✅ 요청 반영:
+    - OCR이 읽은 텍스트를 "그대로" 출력/저장하기 위해
+      int 변환/범위검증(0~20) 등을 하지 않고,
+      OCR 결과에서 숫자 문자열만 뽑아 그대로 반환.
+    - 못 읽으면 "x"
     """
     reader = get_ocr_reader()
     if reader is None:
         return "x"
 
     img_np = _prep_crop_for_ocr(crop)
+
+    # allowlist=숫자만: 그래도 OCR이 이상한 문자를 섞을 수 있어 정규식으로 한번 더 정리
     results = reader.readtext(img_np, detail=1, allowlist="0123456789")
     if not results:
         return "x"
 
-    best = None
+    best_text = ""
     best_score = -1.0
+
     for _, text, conf in results:
-        text = re.sub(r"[^0-9]", "", text or "")
-        if not text:
+        # 숫자만 남김 (예: "O8" -> "8" 같은 케이스 방지)
+        t = re.sub(r"[^0-9]", "", text or "")
+        if not t:
             continue
-        score = conf
-        if len(text) in (1, 2):
+
+        # 신뢰도 + (1~2자리 선호) 가중치
+        score = float(conf)
+        if len(t) in (1, 2):
             score += 0.15
+
         if score > best_score:
             best_score = score
-            best = text
+            best_text = t
 
-    if not best:
-        return "x"
-
-    try:
-        v = int(best)
-        return v if 0 <= v <= 20 else "x"
-    except Exception:
-        return "x"
+    return best_text if best_text else "x"
 
 
 # ======================
@@ -256,7 +261,7 @@ def call_json_schema(content, schema_pack, model_primary="gpt-4.1", model_fallba
 
 
 # ======================
-# Extraction (구조는 AI, 타수는 OCR)
+# Extraction (구조는 AI, 타수 칸 위치는 AI, 타수는 OCR)
 # ======================
 def extract_structure(img: Image.Image):
     prompt = """
@@ -319,7 +324,7 @@ players: {players}
     return call_json_schema(content, TOTALS_SCHEMA)
 
 
-def norm_box_to_pixels(box, w, h, pad=2):
+def norm_box_to_pixels(box, w, h, pad=3):
     x0 = int(max(0, min(1, box["x0"])) * w)
     y0 = int(max(0, min(1, box["y0"])) * h)
     x1 = int(max(0, min(1, box["x1"])) * w)
@@ -337,8 +342,7 @@ def norm_box_to_pixels(box, w, h, pad=2):
 
 def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
     """
-    boxes_4x9: 4x9 normalized boxes
-    return: 4x9 values (int or "x")
+    ✅ OCR이 읽은 값을 그대로 문자열로 저장 (못 읽으면 "x")
     """
     w, h = img.size
     strokes = []
@@ -351,8 +355,8 @@ def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
                 row.append("x")
                 continue
             crop = img.crop(px)
-            v = ocr_read_int_or_x(crop)
-            row.append(v)
+            raw = ocr_read_raw_or_x(crop)
+            row.append(raw)
         strokes.append(row)
     return strokes
 
@@ -365,12 +369,12 @@ def to_df18(players, out_pars, in_pars, out_strokes, in_strokes):
     for idx in range(9):
         row = {"Hole": idx + 1, "Par": int(out_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = out_strokes[p_i][idx]
+            row[name] = out_strokes[p_i][idx]  # ✅ raw string
         rows.append(row)
     for idx in range(9):
         row = {"Hole": idx + 10, "Par": int(in_pars[idx])}
         for p_i, name in enumerate(players):
-            row[name] = in_strokes[p_i][idx]
+            row[name] = in_strokes[p_i][idx]   # ✅ raw string
         rows.append(row)
     return pd.DataFrame(rows).sort_values("Hole").reset_index(drop=True)
 
@@ -382,9 +386,14 @@ def has_unknowns_df(df: pd.DataFrame, players) -> bool:
 def totals_check(df: pd.DataFrame, players, totals: dict):
     # x가 섞이면 합계 검증은 보수적으로(계산 불가) 표시
     def safe_sum(series):
-        if (series.astype(str) == "x").any():
+        s = series.astype(str)
+        if (s == "x").any():
             return None
-        return int(pd.to_numeric(series).sum())
+        # ✅ raw string이므로 numeric 변환
+        try:
+            return int(pd.to_numeric(s).sum())
+        except Exception:
+            return None
 
     out_total = totals.get("out_total", [-1]*4)
     in_total = totals.get("in_total", [-1]*4)
@@ -398,7 +407,6 @@ def totals_check(df: pd.DataFrame, players, totals: dict):
     ]
 
     rows, hints = [], []
-
     for i, p in enumerate(players):
         o_t = int(out_total[i])
         i_t = int(in_total[i])
@@ -416,7 +424,7 @@ def totals_check(df: pd.DataFrame, players, totals: dict):
         ])
 
         if out_sum[i] is None or in_sum[i] is None:
-            hints.append(f"{p}: 'x'가 있어 합계 검증 일부를 SKIP했습니다. x를 숫자로 수정 후 다시 확인하세요.")
+            hints.append(f"{p}: 'x' 또는 비정상 값이 있어 합계 검증 일부를 SKIP했습니다. 값을 숫자로 수정 후 다시 확인하세요.")
 
     df_check = pd.DataFrame(rows, columns=[
         "플레이어",
@@ -532,7 +540,7 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 구조 + OCR로 타수 (실패는 x로 표시)")
+    st.subheader("1) AI로 구조/칸 위치 + OCR 원문 그대로 저장(못 읽으면 x)")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
@@ -582,7 +590,7 @@ with colA:
             st.session_state.df = df
             st.success("✅ 추출 완료! 오른쪽에서 확인/수정 후 정산하세요.")
 
-            # 합계 검증(기존 유지, x면 SKIP)
+            # 합계 검증
             st.session_state.totals_check_df = None
             st.session_state.totals_hints = None
             if use_totals_check_toggle:
@@ -622,15 +630,16 @@ with colB:
         if st.button("💰 18홀 정산 (홀별 내역 포함)"):
             dfv = st.session_state.df.copy()
 
-            # x가 있으면 정산 불가
+            # x 또는 숫자 아닌 값이 있으면 정산 불가
             for p in players:
-                if (dfv[p].astype(str) == "x").any():
-                    st.error("❌ x 값이 남아있어 정산할 수 없습니다. x를 숫자로 수정해주세요.")
+                s = dfv[p].astype(str)
+                if (s == "x").any() or (~s.str.fullmatch(r"\d+")).any():
+                    st.error("❌ x 또는 숫자가 아닌 값이 남아있어 정산할 수 없습니다. 해당 칸을 숫자로 수정해주세요.")
                     st.stop()
 
             # 숫자형 변환
             for p in players:
-                dfv[p] = pd.to_numeric(dfv[p])
+                dfv[p] = pd.to_numeric(dfv[p].astype(str))
 
             prev_all_tie = False
             total = [0, 0, 0, 0]
