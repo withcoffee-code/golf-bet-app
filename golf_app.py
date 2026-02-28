@@ -17,7 +17,7 @@ from openai import OpenAI
 # Page
 # ======================
 st.set_page_config(page_title="Kevin 룰 계산기", layout="wide")
-st.title("⛳ Kevin 룰 계산기")
+st.title("⛳ Kevin 룰 계산기 (OUT/IN 2분할 + 합계검증 + 홀별 정산)")
 
 MAX_WIDTH = 1800
 
@@ -43,7 +43,7 @@ def get_client():
 
 
 # ======================
-# Image utils
+# Image utils (✅ 크롭 기능 제거)
 # ======================
 def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
     img = img.convert("RGB")
@@ -52,26 +52,6 @@ def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
         ratio = max_w / w
         img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
     return img
-
-
-def auto_crop_table(img: Image.Image, pad: int = 18) -> Image.Image:
-    """표/숫자 영역만 자동 크롭(PIL만 사용)"""
-    base = _resize_cap(img, MAX_WIDTH)
-    gray = ImageOps.grayscale(base)
-    gray = ImageOps.autocontrast(gray)
-
-    # 어두운 픽셀 강조
-    bw = gray.point(lambda p: 255 if p < 200 else 0)
-    bbox = bw.getbbox()
-    if not bbox:
-        return base
-
-    x0, y0, x1, y1 = bbox
-    x0 = max(0, x0 - pad)
-    y0 = max(0, y0 - pad)
-    x1 = min(base.size[0], x1 + pad)
-    y1 = min(base.size[1], y1 + pad)
-    return base.crop((x0, y0, x1, y1))
 
 
 def find_split_y(img: Image.Image) -> int | None:
@@ -84,10 +64,8 @@ def find_split_y(img: Image.Image) -> int | None:
     gray = ImageOps.autocontrast(gray)
 
     w, h = gray.size
-    # 글자/선(어두운 픽셀)을 1로
     bw = gray.point(lambda p: 1 if p < 200 else 0)
 
-    # row density
     row_sum = [0] * h
     px = bw.load()
     for y in range(h):
@@ -96,26 +74,21 @@ def find_split_y(img: Image.Image) -> int | None:
             s += px[x, y]
         row_sum[y] = s
 
-    # 가운데 근처에서 "골" 찾기 (중간 +/- 25%)
     y_start = int(h * 0.30)
     y_end = int(h * 0.70)
     if y_end - y_start < 50:
         return None
 
-    window = 25  # smoothing
+    window = 25
     smooth = [0] * h
     for y in range(h):
         a = max(0, y - window)
         b = min(h, y + window + 1)
         smooth[y] = sum(row_sum[a:b]) / (b - a)
 
-    # 중앙 밸리 후보: 최소값
     valley_y = min(range(y_start, y_end), key=lambda y: smooth[y])
-
-    # 너무 위/아래면 실패 처리
     if valley_y < int(h * 0.25) or valley_y > int(h * 0.75):
         return None
-
     return valley_y
 
 
@@ -149,7 +122,6 @@ def preprocess_strong(img: Image.Image) -> Image.Image:
     gray = ImageOps.autocontrast(gray)
     gray = ImageEnhance.Contrast(gray).enhance(1.6)
     gray = ImageEnhance.Sharpness(gray).enhance(1.4)
-    # 보수적 이진화
     gray = gray.point(lambda p: 255 if p > 200 else 0)
     return gray.convert("RGB")
 
@@ -419,10 +391,6 @@ def label_from_strokes(strokes: int, par: int) -> str:
 
 
 def calculate_hole_kevin(strokes, par, prev_all_tie, base_amount, max_per_stroke):
-    """
-    totals[i] > 0 => i가 받음
-    totals[i] < 0 => i가 냄
-    """
     n = len(strokes)
     counts = Counter(strokes)
     tie_three = any(v >= 3 for v in counts.values())
@@ -496,7 +464,6 @@ apply_max = st.sidebar.checkbox("타당 최대 금액 적용", value=True)
 max_per_stroke = st.sidebar.number_input("타당 최대금액", 1000, step=1000, value=20000) if apply_max else None
 
 st.sidebar.divider()
-use_autocrop = st.sidebar.checkbox("표 영역 자동 크롭(추천)", value=True)
 use_split = st.sidebar.checkbox("OUT/IN 자동 2분할(추천)", value=True)
 use_totals_check = st.sidebar.checkbox("OUT/IN 합계 검증(추천)", value=True)
 
@@ -509,20 +476,20 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 스코어 읽기 (크롭 + 2분할 + 세그먼트 재시도)")
+    st.subheader("1) AI로 스코어 읽기 (2분할 + 세그먼트 재시도)")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
 
-        # 크롭
-        img_base = auto_crop_table(img_raw) if use_autocrop else _resize_cap(img_raw, MAX_WIDTH)
+        # ✅ 크롭 제거: 원본(리사이즈만) 사용
+        img_base = _resize_cap(img_raw, MAX_WIDTH)
 
         # 2분할
         if use_split:
             out_img, in_img, split_y = split_out_in(img_base)
             st.caption(f"자동 분할선 y={split_y}")
         else:
-            out_img, in_img = img_base, img_base  # (비권장) 동일 이미지로 처리
+            out_img, in_img = img_base, img_base
 
         # 전처리(기본)
         out_light = preprocess_light(out_img)
@@ -549,7 +516,6 @@ with colA:
             # OUT 타수 1차
             with st.spinner("OUT 타수 추출(1차) 중..."):
                 out_strokes = extract_strokes9(out_light, players, out_pars, "OUT(1~9)")
-            # OUT -1이면 OUT만 강전처리 재시도
             if has_unknowns_4x9(out_strokes):
                 st.warning("⚠️ OUT 타수에 -1이 있어 OUT 표만 강전처리 재시도")
                 out_strong = preprocess_strong(out_img)
@@ -563,7 +529,6 @@ with colA:
             # IN 타수 1차
             with st.spinner("IN 타수 추출(1차) 중..."):
                 in_strokes = extract_strokes9(in_light, players, in_pars, "IN(10~18)")
-            # IN -1이면 IN만 강전처리 재시도
             if has_unknowns_4x9(in_strokes):
                 st.warning("⚠️ IN 타수에 -1이 있어 IN 표만 강전처리 재시도")
                 in_strong = preprocess_strong(in_img)
