@@ -3,21 +3,30 @@ import os
 import base64
 import io
 import json
+import re
 from collections import Counter
 from itertools import combinations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageOps
 
 from openai import OpenAI
 
+# EasyOCR (OCR 엔진)
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except Exception:
+    EASYOCR_AVAILABLE = False
+
 
 # ======================
 # Page
 # ======================
 st.set_page_config(page_title="Kevin 룰 계산기", layout="wide")
-st.title("⛳ Kevin 룰 계산기 (합계검증 + 홀별 정산)")
+st.title("⛳ Kevin 룰 계산기 (OCR 엔진 도입: 타수는 OCR / 구조는 AI)")
 
 MAX_WIDTH = 1800
 
@@ -43,7 +52,7 @@ def get_client():
 
 
 # ======================
-# Image utils (✅ 크롭/2분할 기능 제거)
+# Image utils (크롭/2분할 없음 유지)
 # ======================
 def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
     img = img.convert("RGB")
@@ -79,6 +88,79 @@ def to_data_url(img: Image.Image) -> str:
 
 
 # ======================
+# OCR engine (EasyOCR)
+# ======================
+@st.cache_resource
+def get_ocr_reader():
+    if not EASYOCR_AVAILABLE:
+        return None
+    # 숫자 위주라 en만으로 충분한 경우가 많음(속도/안정)
+    return easyocr.Reader(["en"], gpu=False)
+
+
+def _prep_crop_for_ocr(crop: Image.Image) -> np.ndarray:
+    """
+    숫자 OCR용 전처리: 확대 + 그레이 + 대비 + 약한 이진화
+    """
+    crop = crop.convert("L")
+    # 확대(너무 과하면 깨짐)
+    w, h = crop.size
+    crop = crop.resize((max(40, int(w * 3)), max(40, int(h * 3))), Image.Resampling.LANCZOS)
+
+    crop = ImageOps.autocontrast(crop)
+    crop = ImageEnhance.Contrast(crop).enhance(1.7)
+    crop = ImageEnhance.Sharpness(crop).enhance(1.2)
+
+    # 약한 이진화(배경이 밝은 스코어카드 가정)
+    crop = crop.point(lambda p: 255 if p > 185 else 0)
+
+    return np.array(crop)
+
+
+def ocr_read_int(crop: Image.Image) -> int:
+    """
+    OCR로 숫자만 읽어서 정수 반환. 못 읽으면 -1.
+    """
+    reader = get_ocr_reader()
+    if reader is None:
+        return -1
+
+    img_np = _prep_crop_for_ocr(crop)
+
+    # allowlist로 숫자만
+    results = reader.readtext(img_np, detail=1, allowlist="0123456789")
+    if not results:
+        return -1
+
+    # 결과 중 가장 그럴듯한 숫자 선택
+    # results: [(bbox, text, conf), ...]
+    best = None
+    best_score = -1.0
+    for _, text, conf in results:
+        text = re.sub(r"[^0-9]", "", text or "")
+        if not text:
+            continue
+        # 1~2자리 우선(타수는 보통 3~9 / 최대 20)
+        score = conf
+        if len(text) == 1 or len(text) == 2:
+            score += 0.15
+        if score > best_score:
+            best_score = score
+            best = text
+
+    if not best:
+        return -1
+
+    try:
+        v = int(best)
+        if 0 <= v <= 20:
+            return v
+        return -1
+    except Exception:
+        return -1
+
+
+# ======================
 # JSON Schemas (strict)
 # ======================
 STRUCT_SCHEMA = {
@@ -111,13 +193,14 @@ STRUCT_SCHEMA = {
     "strict": True,
 }
 
-STROKES_SCHEMA = {
-    "name": "scorecard_strokes",
+# 🔥 핵심 추가: "각 타수 칸의 바운딩 박스"를 AI가 뽑아주게 함 (정규화 좌표 0~1)
+CELLBOX_SCHEMA = {
+    "name": "scorecard_cellboxes",
     "schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "out_strokes": {
+            "out_boxes": {
                 "type": "array",
                 "minItems": 4,
                 "maxItems": 4,
@@ -125,10 +208,20 @@ STROKES_SCHEMA = {
                     "type": "array",
                     "minItems": 9,
                     "maxItems": 9,
-                    "items": {"type": "integer", "minimum": -1, "maximum": 20},
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "x0": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y0": {"type": "number", "minimum": 0, "maximum": 1},
+                            "x1": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y1": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["x0", "y0", "x1", "y1"],
+                    },
                 },
             },
-            "in_strokes": {
+            "in_boxes": {
                 "type": "array",
                 "minItems": 4,
                 "maxItems": 4,
@@ -136,11 +229,21 @@ STROKES_SCHEMA = {
                     "type": "array",
                     "minItems": 9,
                     "maxItems": 9,
-                    "items": {"type": "integer", "minimum": -1, "maximum": 20},
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "x0": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y0": {"type": "number", "minimum": 0, "maximum": 1},
+                            "x1": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y1": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["x0", "y0", "x1", "y1"],
+                    },
                 },
             },
         },
-        "required": ["out_strokes", "in_strokes"],
+        "required": ["out_boxes", "in_boxes"],
     },
     "strict": True,
 }
@@ -183,7 +286,7 @@ def call_json_schema(content, schema_pack, model_primary="gpt-4.1", model_fallba
 
 
 # ======================
-# Extraction (2-step: structure -> strokes)
+# Extraction (구조는 AI, 타수는 OCR)
 # ======================
 def extract_structure(img: Image.Image):
     prompt = """
@@ -203,29 +306,31 @@ def extract_structure(img: Image.Image):
     return call_json_schema(content, STRUCT_SCHEMA)
 
 
-def extract_strokes(img: Image.Image, players, out_pars, in_pars):
+def extract_cell_boxes(img: Image.Image, players, out_pars, in_pars):
     prompt = f"""
-이 이미지는 골프 스코어카드(한 장에 OUT/IN 모두 포함)이다.
-이미 아래 정보는 확정되었다. 절대 변경하지 마라.
+이 이미지는 골프 스코어카드이다. (한 장에 OUT/IN 모두 포함)
 
+아래 정보는 이미 확정되었다. 절대 바꾸지 마라:
 players(순서 고정): {players}
 out_pars(1~9): {out_pars}
 in_pars(10~18): {in_pars}
 
-너는 이제 '타수 숫자만' 읽어서 반환하면 된다.
+너의 임무는 "타수 숫자가 적힌 칸"의 바운딩박스를 반환하는 것이다.
 
-반드시 아래만 출력:
-- out_strokes: players 순서대로, 각 플레이어의 OUT 타수 9개 (총 4x9)
-- in_strokes: players 순서대로, 각 플레이어의 IN 타수 9개 (총 4x9)
+반드시 반환:
+- out_boxes: 4x9 (players 순서대로, OUT 1~9홀 순서). 각 원소는 박스(x0,y0,x1,y1)
+- in_boxes: 4x9 (players 순서대로, IN 10~18홀 순서). 각 원소는 박스(x0,y0,x1,y1)
 
-규칙:
-- 숫자를 확실히 읽을 수 없으면 추정하지 말고 -1로 넣어라.
-- 동그라미/별/아이콘은 숫자가 아니다. 무시하라.
-- OUT/IN 섞지 마라.
-- JSON 스키마 외 출력 금지.
+좌표 규칙:
+- x0,y0,x1,y1 는 이미지 전체 대비 정규화 좌표(0~1)
+- x0 < x1, y0 < y1
+- 숫자 텍스트가 들어있는 "칸 내부"가 되게 (너무 타이트하지 말고 약간 여유 있게)
+- 아이콘/동그라미/색칠은 무시, 숫자 칸 기준
+
+JSON 외 출력 금지.
 """
     content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img)}]
-    return call_json_schema(content, STROKES_SCHEMA)
+    return call_json_schema(content, CELLBOX_SCHEMA)
 
 
 def extract_totals(img: Image.Image, players):
@@ -244,8 +349,47 @@ players: {players}
     return call_json_schema(content, TOTALS_SCHEMA)
 
 
+def norm_box_to_pixels(box, w, h, pad=2):
+    x0 = int(max(0, min(1, box["x0"])) * w)
+    y0 = int(max(0, min(1, box["y0"])) * h)
+    x1 = int(max(0, min(1, box["x1"])) * w)
+    y1 = int(max(0, min(1, box["y1"])) * h)
+
+    # 최소 크기 보장 + 패딩
+    x0 = max(0, x0 - pad)
+    y0 = max(0, y0 - pad)
+    x1 = min(w, x1 + pad)
+    y1 = min(h, y1 + pad)
+
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def read_strokes_with_ocr(img: Image.Image, boxes_4x9):
+    """
+    boxes_4x9: 4x9 normalized boxes
+    return: 4x9 int strokes
+    """
+    w, h = img.size
+    strokes = []
+    for pi in range(4):
+        row = []
+        for hi in range(9):
+            b = boxes_4x9[pi][hi]
+            px = norm_box_to_pixels(b, w, h, pad=3)
+            if px is None:
+                row.append(-1)
+                continue
+            crop = img.crop(px)
+            v = ocr_read_int(crop)
+            row.append(v)
+        strokes.append(row)
+    return strokes
+
+
 # ======================
-# DF build + checks
+# DF + checks (기존 유지)
 # ======================
 def to_df18(players, out_pars, in_pars, out_strokes, in_strokes):
     rows = []
@@ -324,7 +468,7 @@ def totals_check(df: pd.DataFrame, players, totals: dict):
 
 
 # ======================
-# Kevin 룰 (버그 수정 + 버디/이글 1:1 보너스)
+# Kevin 룰 (기존 유지)
 # ======================
 def label_from_strokes(strokes: int, par: int) -> str:
     diff = strokes - par
@@ -413,7 +557,10 @@ apply_max = st.sidebar.checkbox("타당 최대 금액 적용", value=True)
 max_per_stroke = st.sidebar.number_input("타당 최대금액", 1000, step=1000, value=20000) if apply_max else None
 
 st.sidebar.divider()
-use_totals_check = st.sidebar.checkbox("OUT/IN 합계 검증(추천)", value=True)
+use_totals_check_toggle = st.sidebar.checkbox("OUT/IN 합계 검증(추천)", value=True)
+
+if not EASYOCR_AVAILABLE:
+    st.sidebar.error("EasyOCR 미설치: requirements.txt에 easyocr, opencv-python-headless, numpy 추가 필요")
 
 
 # ======================
@@ -424,7 +571,7 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 스코어 읽기 (2단계 + 재시도)")
+    st.subheader("1) AI로 구조(이름/PAR/칸 위치) + OCR로 타수 읽기")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
@@ -433,43 +580,53 @@ with colA:
         img_light = preprocess_light(img_base)
         st.image(img_light, caption="전처리(기본)", use_container_width=True)
 
-        if st.button("🤖 AI로 읽기"):
-            with st.spinner("구조(이름/Par) 추출 중..."):
+        if st.button("🤖 읽기 실행 (AI+OCR)"):
+            if not EASYOCR_AVAILABLE:
+                st.error("EasyOCR이 설치되지 않아 진행할 수 없습니다. requirements.txt를 업데이트하세요.")
+                st.stop()
+
+            with st.spinner("구조(이름/Par) 추출(AI) 중..."):
                 struct = extract_structure(img_light)
 
             players = struct["players"]
             out_pars = struct["out_pars"]
             in_pars = struct["in_pars"]
 
-            with st.spinner("타수 추출(1차) 중..."):
-                strokes = extract_strokes(img_light, players, out_pars, in_pars)
+            with st.spinner("타수 칸 위치(바운딩박스) 추출(AI) 중..."):
+                boxes = extract_cell_boxes(img_light, players, out_pars, in_pars)
 
-            df = to_df18(players, out_pars, in_pars, strokes["out_strokes"], strokes["in_strokes"])
+            # OCR로 타수 읽기
+            with st.spinner("타수 OCR 중..."):
+                out_strokes = read_strokes_with_ocr(img_base, boxes["out_boxes"])
+                in_strokes = read_strokes_with_ocr(img_base, boxes["in_boxes"])
 
-            if has_unknowns_df(df, players):
-                st.warning("⚠️ -1이 있어 강전처리로 한 번 더 읽습니다.")
+            df = to_df18(players, out_pars, in_pars, out_strokes, in_strokes)
+
+            # -1이 많으면 강전처리 이미지로 OCR 1회 재시도 (AI 박스는 그대로 사용)
+            if (df[players] < 0).sum().sum() > 0:
+                st.warning("⚠️ 일부 칸 OCR 실패(-1). 강전처리로 OCR 재시도합니다.")
                 img_strong = preprocess_strong(img_base)
-                st.image(img_strong, caption="전처리(강화/재시도용)", use_container_width=True)
+                st.image(img_strong, caption="전처리(강화/OCR 재시도)", use_container_width=True)
 
-                with st.spinner("타수 재추출(2차/강화) 중..."):
-                    strokes2 = extract_strokes(img_strong, players, out_pars, in_pars)
+                out2 = read_strokes_with_ocr(img_strong, boxes["out_boxes"])
+                in2 = read_strokes_with_ocr(img_strong, boxes["in_boxes"])
+                df2 = to_df18(players, out_pars, in_pars, out2, in2)
 
-                df2 = to_df18(players, out_pars, in_pars, strokes2["out_strokes"], strokes2["in_strokes"])
-                if df2[players].lt(0).sum().sum() < df[players].lt(0).sum().sum():
+                if (df2[players] < 0).sum().sum() < (df[players] < 0).sum().sum():
                     df = df2
-                    st.success("✅ 2차 결과가 개선되어 적용했습니다.")
+                    st.success("✅ 강전처리 OCR 재시도로 -1이 줄어들어 2차 결과를 적용했습니다.")
                 else:
-                    st.info("ℹ️ 2차 결과가 더 좋아지지 않아 1차를 유지합니다.")
+                    st.info("ℹ️ 강전처리 OCR이 더 좋지 않아 1차 결과를 유지합니다.")
 
             st.session_state.players = players
             st.session_state.df = df
             st.success("✅ 추출 완료! 오른쪽에서 확인/수정 후 정산하세요.")
 
-            # 합계 검증
+            # 합계 검증(기존 유지)
             st.session_state.totals_check_df = None
             st.session_state.totals_hints = None
-            if use_totals_check:
-                with st.spinner("합계(OUT/IN/T) 추출 및 검증 중..."):
+            if use_totals_check_toggle:
+                with st.spinner("합계(OUT/IN/T) 추출 및 검증(AI) 중..."):
                     totals = extract_totals(img_light, players)
                 check_df, hints, any_diff = totals_check(df, players, totals)
                 st.session_state.totals_check_df = check_df
@@ -484,7 +641,7 @@ with colB:
     st.subheader("2) 결과 확인/수정 + 정산(홀별 포함)")
 
     if st.session_state.df is None:
-        st.info("왼쪽에서 AI로 읽기를 실행하세요.")
+        st.info("왼쪽에서 읽기 실행을 먼저 하세요.")
     else:
         players = st.session_state.players
 
