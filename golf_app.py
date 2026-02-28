@@ -4,10 +4,15 @@
 #
 # 필요:
 #   pip install streamlit pandas pillow openai pypdfium2
-# 실행:
+# 실행(로컬):
 #   export OPENAI_API_KEY="..."
 #   streamlit run app.py
+#
+# 실행(Streamlit Cloud):
+#   Settings > Secrets 에 아래 추가
+#   OPENAI_API_KEY="..."
 
+import os
 import base64
 import io
 import json
@@ -41,32 +46,55 @@ st.title("⛳ Kevin 룰 계산기 (스코어카드 AI 일괄정산)")
 
 
 # ----------------------
+# API KEY 체크/클라이언트
+# ----------------------
+def get_openai_api_key() -> str | None:
+    # 1) Streamlit Cloud secrets
+    try:
+        if "OPENAI_API_KEY" in st.secrets and st.secrets["OPENAI_API_KEY"]:
+            return str(st.secrets["OPENAI_API_KEY"]).strip()
+    except Exception:
+        pass
+
+    # 2) 환경변수
+    key = os.getenv("OPENAI_API_KEY")
+    if key and key.strip():
+        return key.strip()
+
+    return None
+
+
+def get_openai_client():
+    if not OPENAI_AVAILABLE:
+        raise RuntimeError("OpenAI SDK가 필요합니다. (pip install openai)")
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+    return OpenAI(api_key=api_key)
+
+
+api_key_present = get_openai_api_key() is not None
+
+
+# ----------------------
 # 세션 상태 초기화
 # ----------------------
 if "players" not in st.session_state:
     st.session_state.players = ["PLAYER1", "PLAYER2", "PLAYER3", "PLAYER4"]
-
 if "base_amount" not in st.session_state:
     st.session_state.base_amount = 5000
-
 if "apply_max_toggle" not in st.session_state:
     st.session_state.apply_max_toggle = True
-
 if "max_per_stroke" not in st.session_state:
     st.session_state.max_per_stroke = 20000
-
 if "extracted_df" not in st.session_state:
     st.session_state.extracted_df = None
-
 if "edited_df" not in st.session_state:
     st.session_state.edited_df = None
-
 if "calc_history" not in st.session_state:
     st.session_state.calc_history = []
-
 if "calc_total" not in st.session_state:
     st.session_state.calc_total = [0, 0, 0, 0]
-
 if "raw_ai_json" not in st.session_state:
     st.session_state.raw_ai_json = None
 
@@ -91,7 +119,7 @@ else:
     st.session_state.max_per_stroke = None
 
 st.sidebar.divider()
-st.sidebar.caption("✅ 정산 부호: + 받음 / - 냄 (버그 수정 버전)")
+st.sidebar.caption("✅ 정산 부호: + 받음 / - 냄")
 st.sidebar.caption("✅ 배판: (3명 이상 동타 / 전홀 동타 / 버디·이글 발생) 각각 2배씩 곱")
 st.sidebar.caption("✅ 버디/이글 보너스: 1:1에서 버디=-1타, 이글=-2타 유효타수로 반영")
 
@@ -158,9 +186,7 @@ SCORECARD_SCHEMA = {
 
 
 def extract_scorecard_from_images(images_pil, model_name: str):
-    if not OPENAI_AVAILABLE:
-        raise RuntimeError("OpenAI SDK가 필요합니다. (pip install openai)")
-    client = OpenAI()
+    client = get_openai_client()
 
     content = [{"type": "input_text", "text": """
 너는 골프 스코어카드 비전 추출기다.
@@ -206,16 +232,8 @@ def label_from_strokes(strokes: int, par: int) -> str:
 
 
 def calculate_hole_from_strokes(strokes, par, prev_all_tie, base_amount, max_per_stroke):
-    """
-    ✅ 버그 수정 핵심:
-    - totals[i] > 0  => i가 이번 홀 '받음'
-    - totals[i] < 0  => i가 이번 홀 '냄'
-    - 버디/이글 1:1 보너스는 유효타수(effective score) 감소로 반영:
-        버디: -1, 이글: -2
-    """
     n = len(strokes)
 
-    # 배판 조건은 실제 타수 기준(원 룰 유지)
     counts = Counter(strokes)
     tie_three = any(v >= 3 for v in counts.values())
     all_tie = len(set(strokes)) == 1
@@ -245,26 +263,22 @@ def calculate_hole_from_strokes(strokes, par, prev_all_tie, base_amount, max_per
     if max_per_stroke:
         per_stroke_amount = min(per_stroke_amount, max_per_stroke)
 
-    # 버디/이글 보너스(1:1) => 유효타수 감소
     labels = [label_from_strokes(s, par) for s in strokes]
     bonus_map = {"이글": -2, "버디": -1}
     adj = [bonus_map.get(lbl, 0) for lbl in labels]
     effective = [strokes[i] + adj[i] for i in range(n)]
 
-    # money_matrix[i][j] : i의 관점에서 j와의 정산(+받음 / -냄)
     money_matrix = [[0] * n for _ in range(n)]
-
     for i, j in combinations(range(n), 2):
-        # delta > 0 이면 j가 더 못쳤다(유효타수 큼) -> j가 i에게 냄 -> i는 받음(+)
-        delta = effective[j] - effective[i]
+        delta = effective[j] - effective[i]  # +면 j가 못침 -> j가 i에게 냄
         amt = abs(delta) * per_stroke_amount
 
         if delta > 0:
-            money_matrix[i][j] += amt   # i receives from j
-            money_matrix[j][i] -= amt   # j pays to i
+            money_matrix[i][j] += amt
+            money_matrix[j][i] -= amt
         elif delta < 0:
-            money_matrix[j][i] += amt   # j receives from i
-            money_matrix[i][j] -= amt   # i pays to j
+            money_matrix[j][i] += amt
+            money_matrix[i][j] -= amt
 
     totals = [sum(row) for row in money_matrix]
     return totals, money_matrix, False, reason_str, batch_multiplier
@@ -277,7 +291,6 @@ def validate_df18(df: pd.DataFrame, players: list[str]) -> pd.DataFrame:
         raise ValueError(f"필수 컬럼 누락: {missing}")
 
     out = df.copy()
-
     out["Hole"] = pd.to_numeric(out["Hole"], errors="coerce").astype("Int64")
     out["Par"] = pd.to_numeric(out["Par"], errors="coerce").astype("Int64")
     for p in players:
@@ -294,6 +307,19 @@ def validate_df18(df: pd.DataFrame, players: list[str]) -> pd.DataFrame:
         raise ValueError("Par는 3/4/5만 허용합니다.")
 
     return out.sort_values("Hole").reset_index(drop=True)
+
+
+# ----------------------
+# 상단 안내: API 키 상태 표시
+# ----------------------
+if not OPENAI_AVAILABLE:
+    st.error("OpenAI SDK(openai)가 설치되어 있지 않습니다. `pip install openai` 후 다시 실행하세요.")
+elif not api_key_present:
+    st.warning(
+        "OpenAI API 키가 설정되지 않았습니다.\n\n"
+        "• 로컬: 터미널에서 `export OPENAI_API_KEY=\"sk-...\"` 후 실행\n"
+        "• Streamlit Cloud: Settings → Secrets 에 `OPENAI_API_KEY=\"sk-...\"` 추가"
+    )
 
 
 # ----------------------
@@ -329,7 +355,11 @@ with left:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        read_btn = st.button("🤖 AI로 스코어카드 읽기", disabled=(not images))
+        # ✅ API 키 없으면 비활성화
+        read_btn = st.button(
+            "🤖 AI로 스코어카드 읽기",
+            disabled=(not images) or (not OPENAI_AVAILABLE) or (not api_key_present)
+        )
     with col_b:
         reset_btn = st.button("🔄 결과 리셋")
 
@@ -425,11 +455,9 @@ with right:
                     )
 
                     labels = [label_from_strokes(s, par) for s in strokes]
-
                     for i in range(4):
                         total[i] += totals[i]
 
-                    # 홀별 요약 행
                     row = {
                         "Hole": hole,
                         "Par": par,
