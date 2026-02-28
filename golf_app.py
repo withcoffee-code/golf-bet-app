@@ -17,7 +17,7 @@ from openai import OpenAI
 # Page
 # ======================
 st.set_page_config(page_title="Kevin 룰 계산기", layout="wide")
-st.title("⛳ Kevin 룰 계산기 (OUT/IN 2분할 + 합계검증 + 홀별 정산)")
+st.title("⛳ Kevin 룰 계산기 (합계검증 + 홀별 정산)")
 
 MAX_WIDTH = 1800
 
@@ -43,7 +43,7 @@ def get_client():
 
 
 # ======================
-# Image utils (✅ 크롭 기능 제거)
+# Image utils (✅ 크롭/2분할 기능 제거)
 # ======================
 def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
     img = img.convert("RGB")
@@ -52,60 +52,6 @@ def _resize_cap(img: Image.Image, max_w=MAX_WIDTH) -> Image.Image:
         ratio = max_w / w
         img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
     return img
-
-
-def find_split_y(img: Image.Image) -> int | None:
-    """
-    OUT/IN 표가 위/아래로 나뉜 경우가 많아서,
-    '어두운 픽셀 밀도'가 낮은 수평 구간(빈 줄)을 찾아 분할선으로 사용.
-    """
-    base = _resize_cap(img, MAX_WIDTH)
-    gray = ImageOps.grayscale(base)
-    gray = ImageOps.autocontrast(gray)
-
-    w, h = gray.size
-    bw = gray.point(lambda p: 1 if p < 200 else 0)
-
-    row_sum = [0] * h
-    px = bw.load()
-    for y in range(h):
-        s = 0
-        for x in range(w):
-            s += px[x, y]
-        row_sum[y] = s
-
-    y_start = int(h * 0.30)
-    y_end = int(h * 0.70)
-    if y_end - y_start < 50:
-        return None
-
-    window = 25
-    smooth = [0] * h
-    for y in range(h):
-        a = max(0, y - window)
-        b = min(h, y + window + 1)
-        smooth[y] = sum(row_sum[a:b]) / (b - a)
-
-    valley_y = min(range(y_start, y_end), key=lambda y: smooth[y])
-    if valley_y < int(h * 0.25) or valley_y > int(h * 0.75):
-        return None
-    return valley_y
-
-
-def split_out_in(img: Image.Image, pad: int = 10):
-    """자동 분할선 기반으로 OUT/IN 이미지 2개 반환. 실패 시 상/하 반반."""
-    base = _resize_cap(img, MAX_WIDTH)
-    w, h = base.size
-    y = find_split_y(base)
-    if y is None:
-        y = h // 2
-
-    y0 = max(0, y - pad)
-    y1 = min(h, y + pad)
-
-    out_img = base.crop((0, 0, w, y1))
-    in_img = base.crop((0, y0, w, h))
-    return out_img, in_img, y
 
 
 def preprocess_light(img: Image.Image) -> Image.Image:
@@ -135,8 +81,8 @@ def to_data_url(img: Image.Image) -> str:
 # ======================
 # JSON Schemas (strict)
 # ======================
-PLAYERS_SCHEMA = {
-    "name": "scorecard_players",
+STRUCT_SCHEMA = {
+    "name": "scorecard_structure",
     "schema": {
         "type": "object",
         "additionalProperties": False,
@@ -146,38 +92,32 @@ PLAYERS_SCHEMA = {
                 "items": {"type": "string"},
                 "minItems": 4,
                 "maxItems": 4,
-            }
-        },
-        "required": ["players"],
-    },
-    "strict": True,
-}
-
-PARS9_SCHEMA = {
-    "name": "scorecard_pars9",
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "pars": {
+            },
+            "out_pars": {
                 "type": "array",
                 "items": {"type": "integer", "enum": [3, 4, 5]},
                 "minItems": 9,
                 "maxItems": 9,
-            }
+            },
+            "in_pars": {
+                "type": "array",
+                "items": {"type": "integer", "enum": [3, 4, 5]},
+                "minItems": 9,
+                "maxItems": 9,
+            },
         },
-        "required": ["pars"],
+        "required": ["players", "out_pars", "in_pars"],
     },
     "strict": True,
 }
 
-STROKES9_SCHEMA = {
-    "name": "scorecard_strokes9",
+STROKES_SCHEMA = {
+    "name": "scorecard_strokes",
     "schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "strokes": {
+            "out_strokes": {
                 "type": "array",
                 "minItems": 4,
                 "maxItems": 4,
@@ -187,9 +127,20 @@ STROKES9_SCHEMA = {
                     "maxItems": 9,
                     "items": {"type": "integer", "minimum": -1, "maximum": 20},
                 },
-            }
+            },
+            "in_strokes": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                    "type": "array",
+                    "minItems": 9,
+                    "maxItems": 9,
+                    "items": {"type": "integer", "minimum": -1, "maximum": 20},
+                },
+            },
         },
-        "required": ["strokes"],
+        "required": ["out_strokes", "in_strokes"],
     },
     "strict": True,
 }
@@ -232,49 +183,52 @@ def call_json_schema(content, schema_pack, model_primary="gpt-4.1", model_fallba
 
 
 # ======================
-# Extraction (players from full, pars/strokes from split)
+# Extraction (2-step: structure -> strokes)
 # ======================
-def extract_players(img_full: Image.Image):
+def extract_structure(img: Image.Image):
     prompt = """
-이 이미지는 골프 스코어카드이다.
-반드시 players 4명의 이름만 추출해라. (표에서 타수가 기록된 순서대로)
-JSON 외 텍스트 출력 금지.
-"""
-    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img_full)}]
-    return call_json_schema(content, PLAYERS_SCHEMA)["players"]
+이 이미지는 골프 스코어카드(한 장에 OUT/IN 모두 포함)이다.
 
-
-def extract_pars9(img_seg: Image.Image, segment_name: str):
-    prompt = f"""
-이 이미지는 스코어카드의 {segment_name} 9홀 표(Par 행/열 포함)이다.
-반드시 PAR 9개만 순서대로 추출해라.
-JSON 외 텍스트 출력 금지.
-"""
-    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img_seg)}]
-    return call_json_schema(content, PARS9_SCHEMA)["pars"]
-
-
-def extract_strokes9(img_seg: Image.Image, players, pars9, segment_name: str):
-    prompt = f"""
-이 이미지는 스코어카드의 {segment_name} 9홀 표이다.
-players 순서는 고정이며 절대 변경하지 마라.
-
-players: {players}
-pars(9개): {pars9}
-
-너는 이제 타수 숫자만 읽어라.
-- strokes: players 순서대로 각 플레이어의 타수 9개 (총 4x9)
+반드시 아래만 추출해라:
+- players: 4명 이름(스코어 표에서 타수가 기록된 순서대로)
+- out_pars: OUT 1~9홀 PAR 9개
+- in_pars: IN 10~18홀 PAR 9개
 
 규칙:
-- 확실히 못 읽으면 -1 (추정 금지)
-- 아이콘/동그라미/색칠은 숫자 아님
-- JSON 외 출력 금지
+- OUT/IN 섞지 마라.
+- PAR는 3/4/5만.
+- JSON 스키마 외 출력 금지.
 """
-    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img_seg)}]
-    return call_json_schema(content, STROKES9_SCHEMA)["strokes"]
+    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img)}]
+    return call_json_schema(content, STRUCT_SCHEMA)
 
 
-def extract_totals(img_full: Image.Image, players):
+def extract_strokes(img: Image.Image, players, out_pars, in_pars):
+    prompt = f"""
+이 이미지는 골프 스코어카드(한 장에 OUT/IN 모두 포함)이다.
+이미 아래 정보는 확정되었다. 절대 변경하지 마라.
+
+players(순서 고정): {players}
+out_pars(1~9): {out_pars}
+in_pars(10~18): {in_pars}
+
+너는 이제 '타수 숫자만' 읽어서 반환하면 된다.
+
+반드시 아래만 출력:
+- out_strokes: players 순서대로, 각 플레이어의 OUT 타수 9개 (총 4x9)
+- in_strokes: players 순서대로, 각 플레이어의 IN 타수 9개 (총 4x9)
+
+규칙:
+- 숫자를 확실히 읽을 수 없으면 추정하지 말고 -1로 넣어라.
+- 동그라미/별/아이콘은 숫자가 아니다. 무시하라.
+- OUT/IN 섞지 마라.
+- JSON 스키마 외 출력 금지.
+"""
+    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img)}]
+    return call_json_schema(content, STROKES_SCHEMA)
+
+
+def extract_totals(img: Image.Image, players):
     prompt = f"""
 이 이미지는 골프 스코어카드이다.
 players 순서는 고정이다.
@@ -286,7 +240,7 @@ players: {players}
 없거나 확실히 못 읽으면 -1.
 추정 금지. JSON 외 출력 금지.
 """
-    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img_full)}]
+    content = [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": to_data_url(img)}]
     return call_json_schema(content, TOTALS_SCHEMA)
 
 
@@ -295,24 +249,20 @@ players: {players}
 # ======================
 def to_df18(players, out_pars, in_pars, out_strokes, in_strokes):
     rows = []
-    for i in range(9):
-        r = {"Hole": i + 1, "Par": int(out_pars[i])}
-        for pi, p in enumerate(players):
-            r[p] = int(out_strokes[pi][i])
-        rows.append(r)
-    for i in range(9):
-        r = {"Hole": i + 10, "Par": int(in_pars[i])}
-        for pi, p in enumerate(players):
-            r[p] = int(in_strokes[pi][i])
-        rows.append(r)
+    for idx in range(9):
+        row = {"Hole": idx + 1, "Par": int(out_pars[idx])}
+        for p_i, name in enumerate(players):
+            row[name] = int(out_strokes[p_i][idx])
+        rows.append(row)
+    for idx in range(9):
+        row = {"Hole": idx + 10, "Par": int(in_pars[idx])}
+        for p_i, name in enumerate(players):
+            row[name] = int(in_strokes[p_i][idx])
+        rows.append(row)
     return pd.DataFrame(rows).sort_values("Hole").reset_index(drop=True)
 
 
-def has_unknowns_4x9(strokes_4x9):
-    return any(v < 0 for row in strokes_4x9 for v in row)
-
-
-def has_unknowns_df(df: pd.DataFrame, players):
+def has_unknowns_df(df: pd.DataFrame, players) -> bool:
     return (df[players] < 0).any().any()
 
 
@@ -334,8 +284,7 @@ def totals_check(df: pd.DataFrame, players, totals: dict):
                 cand.append(int(r["Hole"]))
         return cand[:6]
 
-    rows = []
-    hints = []
+    rows, hints = [], []
     for i, p in enumerate(players):
         o_t = int(out_total[i])
         i_t = int(in_total[i])
@@ -464,7 +413,6 @@ apply_max = st.sidebar.checkbox("타당 최대 금액 적용", value=True)
 max_per_stroke = st.sidebar.number_input("타당 최대금액", 1000, step=1000, value=20000) if apply_max else None
 
 st.sidebar.divider()
-use_split = st.sidebar.checkbox("OUT/IN 자동 2분할(추천)", value=True)
 use_totals_check = st.sidebar.checkbox("OUT/IN 합계 검증(추천)", value=True)
 
 
@@ -476,73 +424,45 @@ uploaded = st.file_uploader("스코어카드 업로드 (한 장에 OUT/IN 포함
 colA, colB = st.columns(2, gap="large")
 
 with colA:
-    st.subheader("1) AI로 스코어 읽기 (2분할 + 세그먼트 재시도)")
+    st.subheader("1) AI로 스코어 읽기 (2단계 + 재시도)")
 
     if uploaded:
         img_raw = Image.open(uploaded).convert("RGB")
-
-        # ✅ 크롭 제거: 원본(리사이즈만) 사용
         img_base = _resize_cap(img_raw, MAX_WIDTH)
 
-        # 2분할
-        if use_split:
-            out_img, in_img, split_y = split_out_in(img_base)
-            st.caption(f"자동 분할선 y={split_y}")
-        else:
-            out_img, in_img = img_base, img_base
-
-        # 전처리(기본)
-        out_light = preprocess_light(out_img)
-        in_light = preprocess_light(in_img)
-        full_light = preprocess_light(img_base)
-
-        st.image(full_light, caption="전처리(전체/이름&합계용)", use_container_width=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.image(out_light, caption="OUT 표(추정) 전처리", use_container_width=True)
-        with c2:
-            st.image(in_light, caption="IN 표(추정) 전처리", use_container_width=True)
+        img_light = preprocess_light(img_base)
+        st.image(img_light, caption="전처리(기본)", use_container_width=True)
 
         if st.button("🤖 AI로 읽기"):
-            with st.spinner("플레이어 이름 추출(전체 이미지) 중..."):
-                players = extract_players(full_light)
+            with st.spinner("구조(이름/Par) 추출 중..."):
+                struct = extract_structure(img_light)
 
-            with st.spinner("OUT PAR 추출(OUT 표) 중..."):
-                out_pars = extract_pars9(out_light, "OUT(1~9)")
+            players = struct["players"]
+            out_pars = struct["out_pars"]
+            in_pars = struct["in_pars"]
 
-            with st.spinner("IN PAR 추출(IN 표) 중..."):
-                in_pars = extract_pars9(in_light, "IN(10~18)")
+            with st.spinner("타수 추출(1차) 중..."):
+                strokes = extract_strokes(img_light, players, out_pars, in_pars)
 
-            # OUT 타수 1차
-            with st.spinner("OUT 타수 추출(1차) 중..."):
-                out_strokes = extract_strokes9(out_light, players, out_pars, "OUT(1~9)")
-            if has_unknowns_4x9(out_strokes):
-                st.warning("⚠️ OUT 타수에 -1이 있어 OUT 표만 강전처리 재시도")
-                out_strong = preprocess_strong(out_img)
-                st.image(out_strong, caption="OUT 표 강전처리", use_container_width=True)
-                with st.spinner("OUT 타수 재추출(강화) 중..."):
-                    out_strokes2 = extract_strokes9(out_strong, players, out_pars, "OUT(1~9)")
-                if sum(v < 0 for row in out_strokes2 for v in row) < sum(v < 0 for row in out_strokes for v in row):
-                    out_strokes = out_strokes2
-                    st.success("✅ OUT 재시도 결과를 적용했습니다.")
+            df = to_df18(players, out_pars, in_pars, strokes["out_strokes"], strokes["in_strokes"])
 
-            # IN 타수 1차
-            with st.spinner("IN 타수 추출(1차) 중..."):
-                in_strokes = extract_strokes9(in_light, players, in_pars, "IN(10~18)")
-            if has_unknowns_4x9(in_strokes):
-                st.warning("⚠️ IN 타수에 -1이 있어 IN 표만 강전처리 재시도")
-                in_strong = preprocess_strong(in_img)
-                st.image(in_strong, caption="IN 표 강전처리", use_container_width=True)
-                with st.spinner("IN 타수 재추출(강화) 중..."):
-                    in_strokes2 = extract_strokes9(in_strong, players, in_pars, "IN(10~18)")
-                if sum(v < 0 for row in in_strokes2 for v in row) < sum(v < 0 for row in in_strokes for v in row):
-                    in_strokes = in_strokes2
-                    st.success("✅ IN 재시도 결과를 적용했습니다.")
+            if has_unknowns_df(df, players):
+                st.warning("⚠️ -1이 있어 강전처리로 한 번 더 읽습니다.")
+                img_strong = preprocess_strong(img_base)
+                st.image(img_strong, caption="전처리(강화/재시도용)", use_container_width=True)
 
-            df = to_df18(players, out_pars, in_pars, out_strokes, in_strokes)
+                with st.spinner("타수 재추출(2차/강화) 중..."):
+                    strokes2 = extract_strokes(img_strong, players, out_pars, in_pars)
+
+                df2 = to_df18(players, out_pars, in_pars, strokes2["out_strokes"], strokes2["in_strokes"])
+                if df2[players].lt(0).sum().sum() < df[players].lt(0).sum().sum():
+                    df = df2
+                    st.success("✅ 2차 결과가 개선되어 적용했습니다.")
+                else:
+                    st.info("ℹ️ 2차 결과가 더 좋아지지 않아 1차를 유지합니다.")
+
             st.session_state.players = players
             st.session_state.df = df
-
             st.success("✅ 추출 완료! 오른쪽에서 확인/수정 후 정산하세요.")
 
             # 합계 검증
@@ -550,12 +470,12 @@ with colA:
             st.session_state.totals_hints = None
             if use_totals_check:
                 with st.spinner("합계(OUT/IN/T) 추출 및 검증 중..."):
-                    totals = extract_totals(full_light, players)
+                    totals = extract_totals(img_light, players)
                 check_df, hints, any_diff = totals_check(df, players, totals)
                 st.session_state.totals_check_df = check_df
                 st.session_state.totals_hints = hints
                 if any_diff:
-                    st.warning("⚠️ 카드 합계와 현재 입력 합계가 다릅니다. 오른쪽의 후보 홀을 먼저 확인해보세요.")
+                    st.warning("⚠️ 카드 합계와 현재 입력 합계가 다릅니다. 오른쪽 후보 홀을 먼저 확인해보세요.")
                 else:
                     st.success("✅ 합계 검증 OK (또는 카드 합계가 없어 검증 생략됨).")
 
@@ -569,7 +489,7 @@ with colB:
         players = st.session_state.players
 
         if has_unknowns_df(st.session_state.df, players):
-            st.warning("⚠️ -1(미확정) 값이 남아있습니다. 해당 칸을 수정해야 정산이 정확합니다.")
+            st.warning("⚠️ -1(미확정) 값이 남아있습니다. 수정 후 정산하세요.")
 
         if st.session_state.totals_check_df is not None:
             st.markdown("### ✅ OUT/IN 합계 검증")
