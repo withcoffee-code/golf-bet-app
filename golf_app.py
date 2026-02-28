@@ -10,7 +10,7 @@
 #
 # 실행(Streamlit Cloud):
 #   Settings > Secrets 에 아래 추가
-#   OPENAI_API_KEY="..."
+#   OPENAI_API_KEY="sk-..."
 
 import os
 import base64
@@ -146,6 +146,7 @@ def pdf_to_images(file_bytes: bytes):
     return images
 
 
+# 원본 형태 유지 (최소 패치)
 SCORECARD_SCHEMA = {
     "name": "scorecard",
     "schema": {
@@ -207,10 +208,18 @@ def extract_scorecard_from_images(images_pil, model_name: str):
     for img in images_pil:
         content.append({"type": "input_image", "image_url": pil_to_data_url(img)})
 
+    # ✅ 최소 패치: text.format.name/schema/strict 추가 (기존 json_schema 래핑 방식 제거)
     resp = client.responses.create(
         model=model_name,
         input=[{"role": "user", "content": content}],
-        text={"format": {"type": "json_schema", "json_schema": SCORECARD_SCHEMA}},
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": SCORECARD_SCHEMA["name"],
+                "schema": SCORECARD_SCHEMA["schema"],
+                "strict": True,
+            }
+        },
     )
     return resp.output_text
 
@@ -355,7 +364,6 @@ with left:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        # ✅ API 키 없으면 비활성화
         read_btn = st.button(
             "🤖 AI로 스코어카드 읽기",
             disabled=(not images) or (not OPENAI_AVAILABLE) or (not api_key_present)
