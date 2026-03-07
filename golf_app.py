@@ -4,36 +4,27 @@ import numpy as np
 import pandas as pd
 import easyocr
 
-st.set_page_config(page_title="Golf Scorecard Reader")
+st.title("Golf Scorecard Reader")
 
-st.title("⛳ Golf Scorecard Reader")
+reader = easyocr.Reader(['en','ko'])
 
-# OCR 초기화
-reader = easyocr.Reader(['en'])
 
-def preprocess(img):
+def remove_icons(img):
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    blur = cv2.GaussianBlur(gray,(5,5),0)
+    yellow = cv2.inRange(hsv,(20,100,100),(35,255,255))
 
-    thresh = cv2.adaptiveThreshold(
-        blur,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        11,
-        2
-    )
+    img[yellow>0] = (255,255,255)
 
-    return thresh
+    return img
 
 
 def read_digit(cell):
 
     result = reader.readtext(cell, detail=0)
 
-    if len(result) > 0:
+    if result:
 
         txt = result[0]
 
@@ -45,35 +36,35 @@ def read_digit(cell):
     return 0
 
 
-def extract_scores(img):
+def extract_table(img, start_y):
 
-    h,w = img.shape
+    h,w,_ = img.shape
 
-    players = 4
-    holes = 18
+    name_x1 = int(w*0.05)
+    name_x2 = int(w*0.22)
 
-    start_y = int(h*0.30)
-    row_gap = int(h*0.085)
+    score_x1 = int(w*0.25)
+    score_x2 = int(w*0.90)
 
-    start_x = int(w*0.20)
-    col_gap = int(w*0.040)
+    row_h = int(h*0.045)
+    col_w = int((score_x2-score_x1)/10)
 
-    cell_h = int(h*0.06)
-    cell_w = int(w*0.035)
-
+    players=[]
     scores=[]
 
-    for p in range(players):
+    for i in range(4):
+
+        y1 = start_y + (i+2)*row_h
+        y2 = y1 + row_h
 
         row=[]
 
-        y = start_y + p*row_gap
+        for j in range(9):
 
-        for h_idx in range(holes):
+            x1 = score_x1 + j*col_w
+            x2 = x1 + col_w
 
-            x = start_x + h_idx*col_gap
-
-            cell = img[y:y+cell_h, x:x+cell_w]
+            cell = img[y1:y2, x1:x2]
 
             digit = read_digit(cell)
 
@@ -84,10 +75,30 @@ def extract_scores(img):
     return scores
 
 
-uploaded = st.file_uploader(
-    "Upload scorecard screenshot",
-    type=["png","jpg","jpeg"]
-)
+def parse_scorecard(img):
+
+    img = remove_icons(img)
+
+    h,w,_ = img.shape
+
+    out_start = int(h*0.32)
+    in_start = int(h*0.57)
+
+    out_scores = extract_table(img,out_start)
+    in_scores = extract_table(img,in_start)
+
+    final=[]
+
+    for i in range(4):
+
+        final.append(out_scores[i]+in_scores[i])
+
+    players=["김경만","허균","홍성완","이기원"]
+
+    return final, players
+
+
+uploaded = st.file_uploader("Upload Scorecard")
 
 if uploaded:
 
@@ -95,28 +106,15 @@ if uploaded:
 
     img = cv2.imdecode(file_bytes,1)
 
-    st.image(img, caption="Uploaded Scorecard")
+    st.image(img)
 
-    processed = preprocess(img)
-
-    with st.spinner("Reading scores..."):
-
-        scores = extract_scores(processed)
-
-    players = [
-        "Player1",
-        "Player2",
-        "Player3",
-        "Player4"
-    ]
+    scores, players = parse_scorecard(img)
 
     df = pd.DataFrame(
         scores,
         index=players,
         columns=[f"H{i}" for i in range(1,19)]
     )
-
-    st.subheader("Detected Scores")
 
     edited = st.data_editor(df)
 
