@@ -3,91 +3,69 @@ import cv2
 import numpy as np
 from PIL import Image
 
-st.title("⛳ Golf Scorecard Reader")
+st.title("⛳ Golf Scorecard AI Reader")
 
 uploaded = st.file_uploader("스코어카드 업로드", type=["png","jpg","jpeg"])
 
-# 숫자 템플릿 생성
-def generate_templates():
+VALID_VALUES = [-1,0,1,2,3]
 
-    templates = {}
+def normalize_score(v):
 
-    for i in range(10):
+    try:
+        v = int(v)
+    except:
+        return 0
 
-        img = np.zeros((60,40),dtype=np.uint8)
+    if v in VALID_VALUES:
+        return v
 
-        cv2.putText(
-            img,
-            str(i),
-            (5,50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.8,
-            255,
-            3
-        )
+    # 자동 보정
+    if v > 3:
+        return 3
 
-        templates[i] = img
+    if v < -1:
+        return -1
 
-    return templates
+    return v
 
 
-templates = generate_templates()
-
-
-def read_digit(cell):
-
-    cell = cv2.resize(cell,(40,60))
-
-    best = None
-    best_score = -1
-
-    for digit,temp in templates.items():
-
-        res = cv2.matchTemplate(cell,temp,cv2.TM_CCOEFF_NORMED)
-        score = res[0][0]
-
-        if score > best_score:
-
-            best_score = score
-            best = digit
-
-    return best
-
-
-def preprocess(cell):
-
-    if cell is None or cell.size == 0:
-        return None
+def read_cell(cell):
 
     gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
 
-    blur = cv2.GaussianBlur(gray,(3,3),0)
+    gray = cv2.resize(gray,(60,60))
 
-    _,th = cv2.threshold(
-        blur,
-        120,
-        255,
-        cv2.THRESH_BINARY_INV
-    )
+    _,th = cv2.threshold(gray,120,255,cv2.THRESH_BINARY_INV)
 
-    return th
+    pixels = np.sum(th)/255
+
+    # 픽셀 기반 단순 추정
+    if pixels < 300:
+        return 0
+
+    if pixels < 600:
+        return 1
+
+    if pixels < 900:
+        return 2
+
+    return 3
 
 
 def extract_scores(img):
 
-    # 항상 같은 크기로 맞춤
     img = cv2.resize(img,(1170,2532))
 
     h,w,_ = img.shape
 
     rows = 4
-    cols = 9
+    cols = 18
 
-    start_x = int(w*0.22)
-    start_y = int(h*0.40)
+    start_x = int(w*0.18)
+    start_y = int(h*0.39)
 
-    table_w = int(w*0.65)
-    table_h = int(h*0.33)
+    table_w = int(w*0.72)
+    table_h = int(h*0.34)
 
     cell_w = table_w // cols
     cell_h = table_h // rows
@@ -105,15 +83,11 @@ def extract_scores(img):
 
             cell = img[y:y+cell_h,x:x+cell_w]
 
-            th = preprocess(cell)
+            val = read_cell(cell)
 
-            if th is None:
-                row.append(0)
-                continue
+            val = normalize_score(val)
 
-            digit = read_digit(th)
-
-            row.append(digit)
+            row.append(val)
 
         scores.append(row)
 
@@ -125,11 +99,11 @@ if uploaded:
     image = Image.open(uploaded)
     img = np.array(image)
 
-    st.image(img, caption="업로드 이미지")
+    st.image(img)
 
     scores = extract_scores(img)
 
-    st.subheader("인식 결과")
+    st.subheader("읽은 스코어")
 
     for i,row in enumerate(scores):
 
