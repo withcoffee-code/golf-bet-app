@@ -2,46 +2,50 @@ import streamlit as st
 import cv2
 import numpy as np
 import pandas as pd
-import pytesseract
 from PIL import Image
 
-st.title("골프 스코어카드 인식기")
+st.set_page_config(page_title="Golf Scorecard Parser")
+st.title("⛳ 카카오 골프 스코어카드 파서")
 
-uploaded_file = st.file_uploader("스코어카드 캡처 업로드", type=["png","jpg","jpeg"])
+uploaded = st.file_uploader("스코어카드 업로드", type=["png","jpg","jpeg"])
 
-def preprocess(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray,(5,5),0)
-    th = cv2.adaptiveThreshold(
-        blur,255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        11,2
-    )
+def preprocess(cell):
+    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray,(3,3),0)
+    _,th = cv2.threshold(blur,150,255,cv2.THRESH_BINARY_INV)
     return th
 
-def read_digit(cell):
+def classify_digit(img):
 
-    config = "--psm 10 -c tessedit_char_whitelist=0123456789"
+    h,w = img.shape
 
-    txt = pytesseract.image_to_string(cell, config=config)
+    area = np.sum(img==255)
 
-    txt = txt.strip()
-
-    if txt == "":
+    if area < 20:
         return 0
 
-    try:
-        return int(txt)
-    except:
-        return 0
+    left = np.sum(img[:,0:int(w*0.4)]==255)
+    right = np.sum(img[:,int(w*0.6):]==255)
+    top = np.sum(img[0:int(h*0.4),:]==255)
+    bottom = np.sum(img[int(h*0.6):,:]==255)
+
+    if left < 5 and right > 10:
+        return 1
+
+    if top > bottom and left > right:
+        return 2
+
+    if right > left and top > 5:
+        return 3
+
+    return 4
 
 
 def extract_scores(img):
 
-    h, w = img.shape[:2]
+    h,w,_ = img.shape
 
-    start_x = int(w*0.18)
+    start_x = int(w*0.23)
     start_y = int(h*0.40)
 
     cell_w = int(w*0.045)
@@ -50,22 +54,22 @@ def extract_scores(img):
     gap_x = int(w*0.048)
     gap_y = int(h*0.040)
 
-    scores = []
+    scores=[]
 
-    for player in range(4):
+    for p in range(4):
 
-        row = []
+        row=[]
 
         for hole in range(18):
 
             x = start_x + hole*gap_x
-            y = start_y + player*gap_y
+            y = start_y + p*gap_y
 
             cell = img[y:y+cell_h, x:x+cell_w]
 
-            proc = preprocess(cell)
+            th = preprocess(cell)
 
-            digit = read_digit(proc)
+            digit = classify_digit(th)
 
             row.append(digit)
 
@@ -74,21 +78,27 @@ def extract_scores(img):
     return scores
 
 
-if uploaded_file:
+if uploaded:
 
-    image = Image.open(uploaded_file)
+    image = Image.open(uploaded)
     img = np.array(image)
 
-    st.image(image, caption="업로드된 이미지")
+    st.image(image)
 
     scores = extract_scores(img)
 
     df = pd.DataFrame(
         scores,
-        columns=[f"{i}H" for i in range(1,19)],
-        index=[f"Player{i+1}" for i in range(4)]
+        columns=[f"H{i}" for i in range(1,19)],
+        index=["Player1","Player2","Player3","Player4"]
     )
 
     st.subheader("인식 결과")
 
-    st.dataframe(df)
+    edited = st.data_editor(df)
+
+    st.download_button(
+        "CSV 다운로드",
+        edited.to_csv(),
+        "scores.csv"
+    )
