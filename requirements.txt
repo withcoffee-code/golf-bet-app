@@ -1,7 +1,6 @@
 streamlit
 opencv-python-headless
-easyocr
 numpy
 pandas
+tensorflow
 Pillow
-torch
