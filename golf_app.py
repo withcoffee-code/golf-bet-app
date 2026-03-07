@@ -2,69 +2,70 @@ import streamlit as st
 import cv2
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+import pytesseract
+from PIL import Image
 
-st.title("Golf Scorecard Reader")
+st.title("골프 스코어카드 인식기")
 
-# MNIST CNN 모델 로드
-model = tf.keras.models.load_model(
-    tf.keras.utils.get_file(
-        "mnist_model.h5",
-        "https://storage.googleapis.com/tensorflow/keras-datasets/mnist_model.h5"
+uploaded_file = st.file_uploader("스코어카드 캡처 업로드", type=["png","jpg","jpeg"])
+
+def preprocess(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray,(5,5),0)
+    th = cv2.adaptiveThreshold(
+        blur,255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        11,2
     )
-)
+    return th
 
-def predict_digit(cell):
+def read_digit(cell):
 
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+    config = "--psm 10 -c tessedit_char_whitelist=0123456789"
 
-    _,th = cv2.threshold(gray,150,255,cv2.THRESH_BINARY_INV)
+    txt = pytesseract.image_to_string(cell, config=config)
 
-    resized = cv2.resize(th,(28,28))
+    txt = txt.strip()
 
-    norm = resized/255.0
+    if txt == "":
+        return 0
 
-    norm = norm.reshape(1,28,28,1)
-
-    pred = model.predict(norm,verbose=0)
-
-    digit = np.argmax(pred)
-
-    if digit>4:
-        digit = digit%4
-
-    return digit
+    try:
+        return int(txt)
+    except:
+        return 0
 
 
-def extract_scores(img,start_y):
+def extract_scores(img):
 
-    h,w,_ = img.shape
+    h, w = img.shape[:2]
 
-    score_x1 = int(w*0.25)
+    start_x = int(w*0.18)
+    start_y = int(h*0.40)
 
-    col_w = int(w*0.065)
+    cell_w = int(w*0.045)
+    cell_h = int(h*0.035)
 
-    row_h = int(h*0.045)
+    gap_x = int(w*0.048)
+    gap_y = int(h*0.040)
 
-    scores=[]
+    scores = []
 
-    for p in range(4):
+    for player in range(4):
 
-        row=[]
+        row = []
 
-        y1 = start_y + (p+2)*row_h
+        for hole in range(18):
 
-        y2 = y1 + row_h
+            x = start_x + hole*gap_x
+            y = start_y + player*gap_y
 
-        for h_idx in range(9):
+            cell = img[y:y+cell_h, x:x+cell_w]
 
-            x1 = score_x1 + h_idx*col_w
+            proc = preprocess(cell)
 
-            x2 = x1 + col_w
-
-            cell = img[y1:y2,x1:x2]
-
-            digit = predict_digit(cell)
+            digit = read_digit(proc)
 
             row.append(digit)
 
@@ -73,51 +74,21 @@ def extract_scores(img,start_y):
     return scores
 
 
-def parse_scorecard(img):
+if uploaded_file:
 
-    h,w,_ = img.shape
+    image = Image.open(uploaded_file)
+    img = np.array(image)
 
-    out_start = int(h*0.32)
+    st.image(image, caption="업로드된 이미지")
 
-    in_start = int(h*0.57)
-
-    out_scores = extract_scores(img,out_start)
-
-    in_scores = extract_scores(img,in_start)
-
-    final=[]
-
-    for i in range(4):
-
-        final.append(out_scores[i]+in_scores[i])
-
-    players=["김경만","허균","홍성완","이기원"]
-
-    return final,players
-
-
-uploaded = st.file_uploader("Upload Scorecard")
-
-if uploaded:
-
-    file_bytes = np.asarray(bytearray(uploaded.read()),dtype=np.uint8)
-
-    img = cv2.imdecode(file_bytes,1)
-
-    st.image(img)
-
-    scores,players = parse_scorecard(img)
+    scores = extract_scores(img)
 
     df = pd.DataFrame(
         scores,
-        index=players,
-        columns=[f"H{i}" for i in range(1,19)]
+        columns=[f"{i}H" for i in range(1,19)],
+        index=[f"Player{i+1}" for i in range(4)]
     )
 
-    edited = st.data_editor(df)
+    st.subheader("인식 결과")
 
-    st.download_button(
-        "Download CSV",
-        edited.to_csv(),
-        "scores.csv"
-    )
+    st.dataframe(df)
